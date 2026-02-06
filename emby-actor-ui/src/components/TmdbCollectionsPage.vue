@@ -46,6 +46,15 @@
                 开启后，当单部电影入库时，会自动检测其所属系列，<br>并自动订阅该系列中缺失的其他影片。
               </n-tooltip>
             </div>
+            <n-popconfirm @positive-click="triggerAutoCreate">
+              <template #trigger>
+                <n-button :loading="isAutoCreating" type="primary" size="small">
+                  <template #icon><n-icon :component="AddOutline" /></template>
+                  自动创建合集
+                </n-button>
+              </template>
+              扫描电影库，从 TMDb 获取合集信息，<br>自动在 Emby 中创建缺失的合集。<br>（需要库中至少有 2 部同系列电影）
+            </n-popconfirm>
             <n-tooltip>
               <template #trigger>
                 <n-button @click="triggerFullRefresh" :loading="isRefreshing" circle>
@@ -57,7 +66,8 @@
           </n-space>
         </template>
         <n-alert title="操作提示" type="info" style="margin-top: 24px;">
-          <li>点击 <n-icon :component="SyncOutline" /> 可扫描Emby所有原生合集并显示缺失。</li>
+          <li>点击「自动创建合集」可扫描电影库，根据 TMDb 信息自动创建 Emby 中缺失的合集。</li>
+          <li>点击 <n-icon :component="SyncOutline" /> 可扫描 Emby 所有原生合集并显示缺失。</li>
         </n-alert>
       </n-page-header>
 
@@ -338,7 +348,7 @@
 import { ref, onMounted, onBeforeUnmount, computed, watch, h } from 'vue';
 import axios from 'axios';
 import { NLayout, NPageHeader, NEmpty, NTag, NButton, NSpace, NIcon, useMessage, useDialog, NTooltip, NGrid, NGi, NCard, NImage, NEllipsis, NSpin, NAlert, NModal, NTabs, NTabPane, NPopconfirm, NCheckbox, NDropdown, NInput, NSelect, NButtonGroup } from 'naive-ui';
-import { SyncOutline, AlbumsOutline as AlbumsIcon, EyeOutline as EyeIcon, CloudDownloadOutline as CloudDownloadIcon, CheckmarkCircleOutline as CheckmarkCircle, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, SearchOutline as SearchIcon, TrashOutline as TrashIcon, SettingsOutline as SettingsIcon } from '@vicons/ionicons5';
+import { SyncOutline, AddOutline, AlbumsOutline as AlbumsIcon, EyeOutline as EyeIcon, CloudDownloadOutline as CloudDownloadIcon, CheckmarkCircleOutline as CheckmarkCircle, ArrowUpOutline as ArrowUpIcon, ArrowDownOutline as ArrowDownIcon, SearchOutline as SearchIcon, TrashOutline as TrashIcon, SettingsOutline as SettingsIcon } from '@vicons/ionicons5';
 import { format } from 'date-fns';
 import { useConfig } from '../composables/useConfig.js';
 
@@ -353,6 +363,7 @@ const TMDbIcon = () => h('svg', { xmlns: "http://www.w3.org/2000/svg", viewBox: 
 const collections = ref([]);
 const isInitialLoading = ref(true);
 const isRefreshing = ref(false);
+const isAutoCreating = ref(false);
 const error = ref(null);
 const showModal = ref(false);
 const selectedCollection = ref(null);
@@ -558,6 +569,18 @@ const triggerFullRefresh = async () => {
     message.error(err.response?.data?.error || '启动刷新任务失败。');
   } finally {
     isRefreshing.value = false;
+  }
+};
+
+const triggerAutoCreate = async () => {
+  isAutoCreating.value = true;
+  try {
+    const response = await axios.post('/api/tasks/run', { task_name: 'auto-create-collections' });
+    message.success(response.data.message || '自动创建合集任务已在后台启动！');
+  } catch (err) {
+    message.error(err.response?.data?.error || '启动自动创建合集任务失败。');
+  } finally {
+    isAutoCreating.value = false;
   }
 };
 

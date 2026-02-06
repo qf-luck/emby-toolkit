@@ -16,7 +16,7 @@ from .actors import (task_sync_person_map, task_enrich_aliases, task_actor_trans
 from .media import task_role_translation, task_populate_metadata_cache, task_sync_ratings_to_emby, task_execute_auto_tagging_rules, task_scan_monitor_folders, task_restore_local_cache_from_db, task_scan_incomplete_assets 
 from .watchlist import task_process_watchlist, task_refresh_completed_series, task_scan_library_gaps, task_scan_old_seasons_backfill, task_add_all_series_to_watchlist, task_full_scan_all_series
 from .custom_collections import task_process_all_custom_collections, process_single_custom_collection
-from .tmdb_collections import task_refresh_collections
+from .tmdb_collections import task_refresh_collections, task_auto_create_collections
 from .subscriptions import task_auto_subscribe, task_manual_subscribe_batch
 from .covers import task_generate_all_covers, task_generate_all_custom_collection_covers
 from .cleanup import task_scan_for_cleanup_issues 
@@ -187,6 +187,7 @@ def get_task_registry(context: str = 'all'):
         'process-watchlist': (task_process_watchlist, "刷新智能追剧", 'watchlist', True),
         'actor-tracking': (task_process_actor_subscriptions, "刷新演员订阅", 'actor', True),
         'refresh-collections': (task_refresh_collections, "刷新原生合集", 'media', True),
+        'auto-create-collections': (task_auto_create_collections, "自动创建合集", 'media', False),
         'custom-collections': (task_process_all_custom_collections, "刷新自建合集", 'media', True),
         'update-resubscribe-cache': (task_update_resubscribe_cache, "刷新媒体整理", 'media', True),
         'auto-subscribe': (task_auto_subscribe, "统一订阅处理", 'media', True),

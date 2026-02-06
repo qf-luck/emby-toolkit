@@ -505,3 +505,224 @@ def _subscribe_missing_for_single_collection(collection_name: str, all_parts: Li
             source=source,
             media_info_list=unreleased_missing
         )
+
+
+# --- 自动创建合集功能 ---
+def auto_create_collections_from_movies(progress_callback=None, min_collection_size: int = 2):
+    """
+    扫描 Emby 电影库，从 TMDb 获取每部电影的合集信息，
+    自动在 Emby 中创建缺失的合集。
+
+    Args:
+        progress_callback: 进度回调函数
+        min_collection_size: 最小合集大小（库中至少有几部电影才创建合集）
+    """
+    if progress_callback:
+        progress_callback(0, "正在连接 Emby 获取电影列表...")
+
+    logger.info("--- 开始执行自动创建合集任务 ---")
+
+    config = config_manager.APP_CONFIG
+    tmdb_api_key = config.get("tmdb_api_key")
+    emby_url = config.get('emby_server_url')
+    emby_api_key = config.get('emby_api_key')
+    emby_user_id = config.get('emby_user_id')
+    libraries_to_process = config.get("libraries_to_process", [])
+
+    # 1. 获取媒体库信息
+    library_name_map = {}
+    effective_library_ids = libraries_to_process
+    try:
+        all_libs = emby.get_user_accessible_libraries(emby_url, emby_api_key, emby_user_id)
+        if all_libs:
+            library_name_map = {str(lib.get('Id')): lib.get('Name', '') for lib in all_libs}
+            if not effective_library_ids:
+                # 只选择电影库
+                effective_library_ids = [
+                    str(lib.get('Id')) for lib in all_libs
+                    if lib.get('Id') and lib.get('CollectionType') == 'movies'
+                ]
+                logger.info(f"  ➜ 自动检测到 {len(effective_library_ids)} 个电影媒体库。")
+    except Exception as e:
+        logger.warning(f"获取媒体库信息失败: {e}")
+        if progress_callback:
+            progress_callback(-1, f"获取媒体库失败: {e}")
+        return
+
+    if not effective_library_ids:
+        if progress_callback:
+            progress_callback(100, "未找到电影媒体库。")
+        return
+
+    # 2. 获取所有电影
+    if progress_callback:
+        progress_callback(5, "正在从 Emby 获取所有电影...")
+
+    all_movies = emby.get_emby_library_items(
+        base_url=emby_url,
+        api_key=emby_api_key,
+        media_type_filter="Movie",
+        user_id=emby_user_id,
+        library_ids=effective_library_ids,
+        library_name_map=library_name_map,
+        fields="ProviderIds,Name,Id"
+    ) or []
+
+    total_movies = len(all_movies)
+    logger.info(f"  ➜ 从 Emby 获取到 {total_movies} 部电影。")
+
+    if total_movies == 0:
+        if progress_callback:
+            progress_callback(100, "电影库中没有电影。")
+        return
+
+    # 3. 获取 Emby 中已存在的合集
+    if progress_callback:
+        progress_callback(10, "正在获取 Emby 中已存在的合集...")
+
+    existing_collections = emby.get_all_collections_from_emby_generic(emby_url, emby_api_key, emby_user_id) or []
+    existing_collection_tmdb_ids = set()
+    for coll in existing_collections:
+        tmdb_id = coll.get("ProviderIds", {}).get("Tmdb")
+        if tmdb_id:
+            existing_collection_tmdb_ids.add(str(tmdb_id))
+
+    logger.info(f"  ➜ Emby 中已存在 {len(existing_collection_tmdb_ids)} 个有 TMDb ID 的合集。")
+
+    # 4. 并发获取每部电影的 TMDb 合集信息
+    if progress_callback:
+        progress_callback(15, "正在从 TMDb 获取电影合集信息...")
+
+    # 存储: { tmdb_collection_id: { 'name': str, 'movies': [{ 'emby_id': str, 'tmdb_id': str, 'name': str }] } }
+    collection_map = {}
+    processed_count = 0
+
+    def fetch_movie_collection_info(movie):
+        tmdb_id = movie.get("ProviderIds", {}).get("Tmdb")
+        if not tmdb_id:
+            return None
+
+        movie_details = tmdb.get_movie_details(tmdb_id, tmdb_api_key, append_to_response="")
+        if not movie_details:
+            return None
+
+        collection_info = movie_details.get('belongs_to_collection')
+        if not collection_info:
+            return None
+
+        return {
+            'movie_emby_id': movie.get('Id'),
+            'movie_tmdb_id': tmdb_id,
+            'movie_name': movie.get('Name'),
+            'collection_id': str(collection_info.get('id')),
+            'collection_name': collection_info.get('name')
+        }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+        future_to_movie = {executor.submit(fetch_movie_collection_info, m): m for m in all_movies}
+
+        for future in concurrent.futures.as_completed(future_to_movie):
+            processed_count += 1
+            try:
+                result = future.result()
+                if result:
+                    coll_id = result['collection_id']
+                    if coll_id not in collection_map:
+                        collection_map[coll_id] = {
+                            'name': result['collection_name'],
+                            'movies': []
+                        }
+                    collection_map[coll_id]['movies'].append({
+                        'emby_id': result['movie_emby_id'],
+                        'tmdb_id': result['movie_tmdb_id'],
+                        'name': result['movie_name']
+                    })
+            except Exception as e:
+                logger.debug(f"获取电影合集信息失败: {e}")
+
+            if progress_callback and processed_count % 50 == 0:
+                percent = 15 + int((processed_count / total_movies) * 50)
+                progress_callback(percent, f"正在分析电影 ({processed_count}/{total_movies})...")
+
+    logger.info(f"  ➜ 发现 {len(collection_map)} 个不同的 TMDb 合集。")
+
+    # 5. 筛选需要创建的合集
+    collections_to_create = []
+    for coll_id, coll_data in collection_map.items():
+        movie_count = len(coll_data['movies'])
+        # 检查是否满足最小数量要求，且 Emby 中不存在
+        if movie_count >= min_collection_size and coll_id not in existing_collection_tmdb_ids:
+            collections_to_create.append({
+                'tmdb_id': coll_id,
+                'name': coll_data['name'],
+                'movies': coll_data['movies'],
+                'count': movie_count
+            })
+
+    if not collections_to_create:
+        msg = f"没有需要创建的合集（最小要求: {min_collection_size} 部电影）。"
+        logger.info(f"  ➜ {msg}")
+        if progress_callback:
+            progress_callback(100, msg)
+        return
+
+    logger.info(f"  ➜ 需要创建 {len(collections_to_create)} 个合集。")
+
+    # 6. 在 Emby 中创建合集
+    if progress_callback:
+        progress_callback(70, f"正在创建 {len(collections_to_create)} 个合集...")
+
+    created_count = 0
+    failed_count = 0
+
+    for i, coll in enumerate(collections_to_create):
+        try:
+            emby_ids = [m['emby_id'] for m in coll['movies']]
+
+            # 使用现有的合集创建函数
+            new_collection_id = emby.create_or_update_collection_with_emby_ids(
+                collection_name=coll['name'],
+                emby_item_ids=emby_ids,
+                base_url=emby_url,
+                api_key=emby_api_key,
+                user_id=emby_user_id,
+                allow_empty=False
+            )
+
+            if new_collection_id:
+                created_count += 1
+                logger.info(f"  ✅ 成功创建合集: {coll['name']} ({coll['count']} 部电影)")
+
+                # 同时获取 TMDb 合集详情并写入数据库
+                coll_details = tmdb.get_collection_details(coll['tmdb_id'], tmdb_api_key)
+                if coll_details and 'parts' in coll_details:
+                    all_tmdb_ids = [str(p['id']) for p in coll_details.get('parts', []) if p.get('id')]
+                    tmdb_collection_db.upsert_native_collection({
+                        'emby_collection_id': new_collection_id,
+                        'name': coll['name'],
+                        'tmdb_collection_id': coll['tmdb_id'],
+                        'poster_path': coll_details.get('poster_path'),
+                        'all_tmdb_ids': all_tmdb_ids
+                    })
+            else:
+                failed_count += 1
+                logger.warning(f"  ⚠️ 创建合集失败: {coll['name']}")
+
+        except Exception as e:
+            failed_count += 1
+            logger.error(f"  ❌ 创建合集 {coll['name']} 时出错: {e}")
+
+        if progress_callback:
+            percent = 70 + int(((i + 1) / len(collections_to_create)) * 25)
+            progress_callback(percent, f"正在创建合集 ({i + 1}/{len(collections_to_create)}): {coll['name']}")
+
+    # 7. 完成
+    final_msg = f"自动创建合集完成！成功: {created_count}, 失败: {failed_count}"
+    logger.info(f"--- {final_msg} ---")
+
+    if progress_callback:
+        progress_callback(100, final_msg)
+
+    # 执行缺失订阅
+    if created_count > 0:
+        subscribe_all_missing_in_native_collections()
