@@ -1,5 +1,6 @@
 # tasks/watchlist.py
 # 智能追剧列表任务模块
+import json
 import time
 import logging
 from typing import Optional
@@ -10,6 +11,8 @@ import constants
 import extensions
 import task_manager
 from database import watchlist_db, request_db
+from database.connection import get_db_connection
+from handler import emby
 from psycopg2.extras import execute_values
 from watchlist_processor import STATUS_WATCHING, STATUS_PAUSED, STATUS_COMPLETED
 
@@ -56,35 +59,128 @@ def task_refresh_completed_series(processor):
 # --- 一键扫描库内剧集任务 ---
 def task_add_all_series_to_watchlist(processor):
     """
-    【V3 - 全量校准版】
-    1. 扫描库内未纳管的剧集，将其直接标记为“已完结”。
-    2. 获取指定库内所有“已完结且非强制”的剧集（包含新导入的和旧的）。
-    3. 对这些剧集执行并发状态校准，将“假完结”修正为“追剧中”。
+    【V4 - 全量导入+校准版】
+    1. 从 Emby 获取所有剧集，确保它们都在数据库中。
+    2. 扫描库内未纳管的剧集，将其直接标记为"已完结"。
+    3. 获取指定库内所有"已完结且非强制"的剧集（包含新导入的和旧的）。
+    4. 对这些剧集执行并发状态校准，将"假完结"修正为"追剧中"。
     """
     task_name = "一键扫描库内剧集"
-    logger.trace(f"--- 开始执行 '{task_name}' (存量导入 + 全量校准) ---")
-    
+    logger.trace(f"--- 开始执行 '{task_name}' (全量导入 + 状态校准) ---")
+
     try:
         # 1. 读取配置
         task_manager.update_status_from_thread(5, "正在读取配置...")
         library_ids_to_process = processor.config.get(constants.CONFIG_OPTION_EMBY_LIBRARIES_TO_PROCESS, [])
-        
+
         if library_ids_to_process:
             logger.info(f"  ➜ 已启用媒体库过滤器: {library_ids_to_process}")
         else:
             logger.info("  ➜ 未指定媒体库，将扫描所有剧集。")
 
+        # ★★★ 新增步骤：从 Emby 获取所有剧集并导入数据库 ★★★
+        task_manager.update_status_from_thread(8, "正在从 Emby 获取所有剧集...")
+
+        # 获取媒体库名称映射和ID列表
+        library_name_map = {}
+        effective_library_ids = library_ids_to_process
+        try:
+            all_libs = emby.get_user_accessible_libraries(
+                processor.emby_url, processor.emby_api_key, processor.emby_user_id
+            )
+            if all_libs:
+                library_name_map = {str(lib.get('Id')): lib.get('Name', '') for lib in all_libs}
+                # 如果未指定媒体库，使用所有可用的媒体库
+                if not effective_library_ids:
+                    effective_library_ids = [str(lib.get('Id')) for lib in all_libs if lib.get('Id')]
+                    logger.info(f"  ➜ 未指定媒体库，将扫描所有 {len(effective_library_ids)} 个媒体库。")
+        except Exception as e:
+            logger.warning(f"获取媒体库信息失败: {e}")
+
+        # 从 Emby 获取所有剧集（使用已修复分页的函数）
+        all_series = emby.get_emby_library_items(
+            base_url=processor.emby_url,
+            api_key=processor.emby_api_key,
+            media_type_filter="Series",
+            user_id=processor.emby_user_id,
+            library_ids=effective_library_ids,
+            library_name_map=library_name_map,
+            fields="ProviderIds,Name,Type,Path"
+        ) or []
+
+        logger.info(f"  ➜ 从 Emby 获取到 {len(all_series)} 部剧集。")
+
+        # 批量将剧集导入数据库
+        if all_series:
+            task_manager.update_status_from_thread(12, f"正在将 {len(all_series)} 部剧集同步到数据库...")
+            imported_count = 0
+            skipped_count = 0
+
+            with get_db_connection() as conn:
+                cursor = conn.cursor()
+                for series in all_series:
+                    tmdb_id = series.get("ProviderIds", {}).get("Tmdb")
+                    if not tmdb_id:
+                        skipped_count += 1
+                        continue
+
+                    item_name = series.get("Name", "未知剧集")
+                    item_id = series.get("Id")
+                    source_library_id = series.get("_SourceLibraryId")
+
+                    # 构建 asset_details_json
+                    asset_details = [{"emby_item_id": item_id, "source_library_id": source_library_id}] if item_id else []
+
+                    # 使用 UPSERT 确保剧集存在于数据库中
+                    sql = """
+                        INSERT INTO media_metadata (tmdb_id, item_type, title, in_library, emby_item_ids_json, asset_details_json)
+                        VALUES (%s, 'Series', %s, TRUE, %s, %s)
+                        ON CONFLICT (tmdb_id, item_type) DO UPDATE SET
+                            in_library = TRUE,
+                            title = COALESCE(NULLIF(media_metadata.title, ''), EXCLUDED.title),
+                            emby_item_ids_json = (
+                                SELECT jsonb_agg(DISTINCT elem)
+                                FROM (
+                                    SELECT jsonb_array_elements_text(COALESCE(media_metadata.emby_item_ids_json, '[]'::jsonb)) AS elem
+                                    UNION
+                                    SELECT jsonb_array_elements_text(EXCLUDED.emby_item_ids_json) AS elem
+                                ) AS combined
+                                WHERE elem IS NOT NULL
+                            ),
+                            asset_details_json = (
+                                SELECT jsonb_agg(DISTINCT elem)
+                                FROM (
+                                    SELECT jsonb_array_elements(COALESCE(media_metadata.asset_details_json, '[]'::jsonb)) AS elem
+                                    UNION
+                                    SELECT jsonb_array_elements(EXCLUDED.asset_details_json) AS elem
+                                ) AS combined
+                            )
+                    """
+                    try:
+                        cursor.execute(sql, (
+                            str(tmdb_id),
+                            item_name,
+                            json.dumps([item_id]) if item_id else '[]',
+                            json.dumps(asset_details)
+                        ))
+                        imported_count += 1
+                    except Exception as e:
+                        logger.debug(f"导入剧集 {item_name} 时出错: {e}")
+
+                conn.commit()
+
+            logger.info(f"  ➜ 已同步 {imported_count} 部剧集到数据库，跳过 {skipped_count} 部（无 TMDb ID）。")
+
         # 2. 执行数据库更新 (导入为 Completed)
-        # 我们不再关心它返回了多少个新ID，因为后面我们会全量查一遍
-        task_manager.update_status_from_thread(15, "正在数据库中执行存量导入...")
+        task_manager.update_status_from_thread(18, "正在更新剧集状态...")
         try:
             watchlist_db.batch_import_series_as_completed(library_ids_to_process)
         except Exception as e_db:
             raise RuntimeError(f"数据库执行失败: {e_db}")
 
-        # 3. ★★★ 核心修改：获取所有需要校准的候选剧集 ★★★
+        # 3. 获取所有需要校准的候选剧集
         # 目标：所有在目标库内、状态为 Completed、且没有被用户强制完结的剧集
-        task_manager.update_status_from_thread(30, "正在筛选需要校准的剧集...")
+        task_manager.update_status_from_thread(25, "正在筛选需要校准的剧集...")
         
         condition_sql = """
             watching_status = 'Completed' 
@@ -103,14 +199,14 @@ def task_add_all_series_to_watchlist(processor):
         total_count = len(candidates)
         
         if total_count > 0:
-            logger.info(f"  ➜ 筛选出 {total_count} 部“已完结”剧集（含新旧），准备进行状态校准...")
-            task_manager.update_status_from_thread(40, f"准备校准 {total_count} 部剧集的状态...")
-            
+            logger.info(f"  ➜ 筛选出 {total_count} 部"已完结"剧集（含新旧），准备进行状态校准...")
+            task_manager.update_status_from_thread(30, f"准备校准 {total_count} 部剧集的状态...")
+
             time.sleep(1)
-            
+
             # 4. 并发执行校准
             processed_count = 0
-            
+
             def worker(series_data):
                 try:
                     # 调用单体处理逻辑，它会自动修正状态 (Completed -> Watching)
@@ -121,11 +217,11 @@ def task_add_all_series_to_watchlist(processor):
             # 使用线程池
             with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
                 futures = [executor.submit(worker, s) for s in candidates]
-                
+
                 for future in concurrent.futures.as_completed(futures):
                     processed_count += 1
-                    # 进度条从 40% 走到 100%
-                    progress = 40 + int((processed_count / total_count) * 60)
+                    # 进度条从 30% 走到 100%
+                    progress = 30 + int((processed_count / total_count) * 70)
                     # 每处理5个或者最后时刻更新一次UI，避免太频繁
                     if processed_count % 5 == 0 or processed_count == total_count:
                         task_manager.update_status_from_thread(progress, f"正在校准: {processed_count}/{total_count}")
