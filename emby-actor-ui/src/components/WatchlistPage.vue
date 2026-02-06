@@ -39,8 +39,19 @@
                   一键扫描
                 </n-button>
               </template>
-              确定要扫描 Emby 选定的媒体库中的所有剧集吗？<br />
-              此操作会忽略已在列表中的剧集，只添加新的。
+              扫描数据库中已入库的剧集。<br />
+              适用于日常使用（速度快）。
+            </n-popconfirm>
+
+            <n-popconfirm @positive-click="fullScanAllSeries">
+              <template #trigger>
+                <n-button size="small" :loading="isFullScanning" type="warning">
+                  <template #icon><n-icon :component="ScanIcon" /></template>
+                  全量扫描
+                </n-button>
+              </template>
+              从 Emby 获取所有剧集并导入数据库。<br />
+              适用于首次使用或存量剧集未入库的情况（较慢）。
             </n-popconfirm>
 
             <n-button size="small" @click="triggerGapScan" :loading="isGapScanning">
@@ -617,6 +628,7 @@ const isBatchUpdating = ref(false);
 const error = ref(null);
 const showModal = ref(false);
 const isAddingAll = ref(false);
+const isFullScanning = ref(false);
 const isGapScanning = ref(false);
 const selectedSeries = ref(null);
 const refreshingItems = ref({});
@@ -1143,6 +1155,18 @@ const addAllSeriesToWatchlist = async () => {
     message.error(err.response?.data?.error || '启动扫描任务失败。');
   } finally {
     isAddingAll.value = false;
+  }
+};
+
+const fullScanAllSeries = async () => {
+  isFullScanning.value = true;
+  try {
+    const response = await axios.post('/api/tasks/run', { task_name: 'full-scan-all-series' });
+    message.success(response.data.message || '全量扫描任务已成功提交！');
+  } catch (err) {
+    message.error(err.response?.data?.error || '启动全量扫描任务失败。');
+  } finally {
+    isFullScanning.value = false;
   }
 };
 
