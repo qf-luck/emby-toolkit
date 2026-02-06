@@ -199,7 +199,7 @@ def task_add_all_series_to_watchlist(processor):
         total_count = len(candidates)
         
         if total_count > 0:
-            logger.info(f"  ➜ 筛选出 {total_count} 部"已完结"剧集（含新旧），准备进行状态校准...")
+            logger.info(f'  ➜ 筛选出 {total_count} 部"已完结"剧集（含新旧），准备进行状态校准...')
             task_manager.update_status_from_thread(30, f"准备校准 {total_count} 部剧集的状态...")
 
             time.sleep(1)
