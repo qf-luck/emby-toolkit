@@ -392,7 +392,7 @@ def stream_update_progress():
             yield f"data: {json.dumps(data)}\n\n"
 
         container_name = config_manager.APP_CONFIG.get('container_name', 'emby-toolkit')
-        image_name_tag = config_manager.APP_CONFIG.get('docker_image_name', 'hbq0405/emby-toolkit:latest')
+        image_name_tag = config_manager.APP_CONFIG.get('docker_image_name', 'redream/emby-toolkit:latest')
 
         # 调用共享的生成器
         generator = _update_process_generator(container_name, image_name_tag)

@@ -744,48 +744,66 @@ def get_emby_library_items(
         return []
 
     all_items_from_selected_libraries: List[Dict[str, Any]] = []
+    # 分页配置
+    batch_size = 500
+
     for lib_id in library_ids:
         if not lib_id or not lib_id.strip():
             continue
-        
+
         library_name = library_name_map.get(lib_id, lib_id) if library_name_map else lib_id
-        
+
         try:
             fields_to_request = fields if fields else "ProviderIds,Name,Type,MediaStreams,ChildCount,Path,OriginalTitle"
-
-            params = {
-                "api_key": api_key, "Recursive": "true", "ParentId": lib_id,
-                "Fields": fields_to_request,
-            }
-            if media_type_filter:
-                params["IncludeItemTypes"] = media_type_filter
-            
-            # ★★★ 核心修复：应用服务器端优化参数 ★★★
-            if sort_by:
-                params["SortBy"] = sort_by
-            if sort_order and sort_by: # 只有在指定排序时才需要排序顺序
-                params["SortOrder"] = sort_order
-            if limit is not None:
-                params["Limit"] = limit
 
             if force_user_endpoint and user_id:
                 api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
             else:
                 api_url = f"{base_url.rstrip('/')}/Items"
-                if user_id:
+
+            # ★★★ 核心修复：添加分页循环逻辑 ★★★
+            start_index = 0
+            # 如果调用者指定了 limit，则使用指定值，否则使用分页获取全部
+            use_pagination = limit is None
+            request_limit = batch_size if use_pagination else limit
+
+            while True:
+                params = {
+                    "api_key": api_key, "Recursive": "true", "ParentId": lib_id,
+                    "Fields": fields_to_request,
+                    "StartIndex": start_index,
+                    "Limit": request_limit,
+                }
+                if media_type_filter:
+                    params["IncludeItemTypes"] = media_type_filter
+
+                if sort_by:
+                    params["SortBy"] = sort_by
+                if sort_order and sort_by:
+                    params["SortOrder"] = sort_order
+
+                if not (force_user_endpoint and user_id) and user_id:
                     params["UserId"] = user_id
 
-            logger.trace(f"Requesting items from library '{library_name}' (ID: {lib_id}) using URL: {api_url}.")
-            
-            response = emby_client.get(api_url, params=params)
-            response.raise_for_status()
-            items_in_lib = response.json().get("Items", [])
-            
-            if items_in_lib:
-                for item in items_in_lib:
+                logger.trace(f"Requesting items from library '{library_name}' (ID: {lib_id}), StartIndex: {start_index}, Limit: {request_limit}.")
+
+                response = emby_client.get(api_url, params=params)
+                response.raise_for_status()
+                items_in_batch = response.json().get("Items", [])
+
+                if not items_in_batch:
+                    break
+
+                for item in items_in_batch:
                     item['_SourceLibraryId'] = lib_id
-                all_items_from_selected_libraries.extend(items_in_lib)
-        
+                all_items_from_selected_libraries.extend(items_in_batch)
+
+                # 如果不使用分页（调用者指定了limit），或者返回数量少于请求数量，则退出循环
+                if not use_pagination or len(items_in_batch) < request_limit:
+                    break
+
+                start_index += len(items_in_batch)
+
         except Exception as e:
             logger.error(f"请求库 '{library_name}' 中的项目失败: {e}", exc_info=True)
             continue
@@ -1278,17 +1296,35 @@ def get_all_collections_from_emby_generic(base_url: str, api_key: str, user_id: 
         return None
 
     api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
-    params = {
-        "api_key": api_key,
-        "IncludeItemTypes": "BoxSet",
-        "Recursive": "true",
-        "Fields": "ProviderIds,Name,ImageTags"
-    }
-    
+    all_collections = []
+    start_index = 0
+    batch_size = 500
+
     try:
-        response = emby_client.get(api_url, params=params)
-        response.raise_for_status()
-        all_collections = response.json().get("Items", [])
+        while True:
+            params = {
+                "api_key": api_key,
+                "IncludeItemTypes": "BoxSet",
+                "Recursive": "true",
+                "Fields": "ProviderIds,Name,ImageTags",
+                "StartIndex": start_index,
+                "Limit": batch_size
+            }
+
+            response = emby_client.get(api_url, params=params)
+            response.raise_for_status()
+            items_in_batch = response.json().get("Items", [])
+
+            if not items_in_batch:
+                break
+
+            all_collections.extend(items_in_batch)
+
+            if len(items_in_batch) < batch_size:
+                break
+
+            start_index += len(items_in_batch)
+
         logger.debug(f"  ➜ 成功从 Emby 获取到 {len(all_collections)} 个合集。")
         return all_collections
     except Exception as e:
@@ -1301,20 +1337,38 @@ def get_all_collections_with_items(base_url: str, api_key: str, user_id: str) ->
         return None
 
     logger.info("  ➜ 正在从 Emby 获取所有合集...")
-    
+
     api_url = f"{base_url.rstrip('/')}/Users/{user_id}/Items"
-    params = {
-        "api_key": api_key,
-        "IncludeItemTypes": "BoxSet",
-        "Recursive": "true",
-        "Fields": "ProviderIds,Name,ImageTags"
-    }
-    
+    all_collections_from_emby = []
+    start_index = 0
+    batch_size = 500
+
     try:
-        response = emby_client.get(api_url, params=params)
-        response.raise_for_status()
-        all_collections_from_emby = response.json().get("Items", [])
-        
+        # ★★★ 分页获取所有合集 ★★★
+        while True:
+            params = {
+                "api_key": api_key,
+                "IncludeItemTypes": "BoxSet",
+                "Recursive": "true",
+                "Fields": "ProviderIds,Name,ImageTags",
+                "StartIndex": start_index,
+                "Limit": batch_size
+            }
+
+            response = emby_client.get(api_url, params=params)
+            response.raise_for_status()
+            items_in_batch = response.json().get("Items", [])
+
+            if not items_in_batch:
+                break
+
+            all_collections_from_emby.extend(items_in_batch)
+
+            if len(items_in_batch) < batch_size:
+                break
+
+            start_index += len(items_in_batch)
+
         regular_collections = []
         for coll in all_collections_from_emby:
             if coll.get("ProviderIds", {}).get("Tmdb"):
@@ -1402,23 +1456,48 @@ def get_all_native_collections_from_emby(base_url: str, api_key: str, user_id: s
         def process_library(library: Dict[str, Any]) -> List[Dict[str, Any]]:
             library_id = library.get('Id')
             library_name = library.get('Name')
-            
+
             collections_url = f"{base_url}/Users/{user_id}/Items"
-            params = { "ParentId": library_id, "IncludeItemTypes": "BoxSet", "Recursive": "true", "fields": "ProviderIds,Name,Id,ImageTags", "api_key": api_key }
-            
+            collections_in_library = []
+            start_index = 0
+            batch_size = 500
+
             try:
-                response = emby_client.get(collections_url, params=params)
-                response.raise_for_status()
-                collections_in_library = response.json().get("Items", [])
-                
-                if not collections_in_library: return []
+                # ★★★ 分页获取媒体库中的所有合集 ★★★
+                while True:
+                    params = {
+                        "ParentId": library_id,
+                        "IncludeItemTypes": "BoxSet",
+                        "Recursive": "true",
+                        "fields": "ProviderIds,Name,Id,ImageTags",
+                        "api_key": api_key,
+                        "StartIndex": start_index,
+                        "Limit": batch_size
+                    }
+
+                    response = emby_client.get(collections_url, params=params)
+                    response.raise_for_status()
+                    items_in_batch = response.json().get("Items", [])
+
+                    if not items_in_batch:
+                        break
+
+                    collections_in_library.extend(items_in_batch)
+
+                    if len(items_in_batch) < batch_size:
+                        break
+
+                    start_index += len(items_in_batch)
+
+                if not collections_in_library:
+                    return []
 
                 processed = []
                 # ★★★ 核心逻辑回归：在这里使用你最初的正确判断方法 ★★★
                 for collection in collections_in_library:
                     provider_ids = collection.get("ProviderIds", {})
                     tmdb_collection_id = provider_ids.get("Tmdb")
-                    
+
                     # 只有当 Tmdb ID 存在时，才认为它是一个原生合集
                     if tmdb_collection_id:
                         processed.append({
@@ -1428,10 +1507,10 @@ def get_all_native_collections_from_emby(base_url: str, api_key: str, user_id: s
                             'ImageTags': collection.get('ImageTags'),
                             'ParentId': library_id
                         })
-                
+
                 if processed:
                     logger.debug(f"  ➜ 在媒体库 '{library_name}' 中找到 {len(processed)} 个原生合集。")
-                
+
                 return processed
             except requests.RequestException as e_coll:
                 logger.error(f"  ➜ 查询媒体库 '{library_name}' (ID: {library_id}) 中的合集时失败: {e_coll}")
