@@ -487,7 +487,7 @@ const MediaCard = defineComponent({
     <div class="media-card" @mouseenter="hover=true" @mouseleave="hover=false">
       <div v-if="loading" class="loading-overlay"><n-spin size="medium" stroke="#ffffff" /></div>
       <div class="poster-wrapper">
-        <img :src="item.poster ? 'https://image.tmdb.org/t/p/w300' + item.poster : '/default-poster.png'" class="media-poster" loading="lazy"/>
+        <img :src="item.poster ? 'https://wsrv.nl/?url=https://image.tmdb.org/t/p/w300' + item.poster : '/default-poster.png'" class="media-poster" loading="lazy"/>
         <div v-if="item.in_library" class="ribbon ribbon-green"><span>已入库</span></div>
         <div v-else-if="item.subscription_status === 'SUBSCRIBED'" class="ribbon ribbon-blue"><span>已订阅</span></div>
         <div v-else-if="item.subscription_status === 'PAUSED'" class="ribbon ribbon-blue"><span>已暂停</span></div>

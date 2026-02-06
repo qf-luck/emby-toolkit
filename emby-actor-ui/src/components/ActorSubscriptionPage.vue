@@ -164,7 +164,7 @@ const getImageUrl = (path) => {
   if (!path) {
     return 'https://via.placeholder.com/185x278.png?text=No+Image';
   }
-  return `https://image.tmdb.org/t/p/w185${path}`;
+  return `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w185${path}`;
 };
 
 const handleAddSubscription = () => {

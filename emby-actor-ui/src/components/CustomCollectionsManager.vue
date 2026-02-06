@@ -1257,11 +1257,11 @@ const getCardImageUrl = (item) => {
   // 优先级 2: TMDb 背景图 (走通用代理)
   let tmdbUrl = null;
   if (item.backdrop_path) {
-    tmdbUrl = `https://image.tmdb.org/t/p/w780${item.backdrop_path}`;
+    tmdbUrl = `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w780${item.backdrop_path}`;
   }
   // 优先级 3: TMDb 海报图 (走通用代理)
   else if (item.poster_path) {
-    tmdbUrl = `https://image.tmdb.org/t/p/w780${item.poster_path}`;
+    tmdbUrl = `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w780${item.poster_path}`;
   }
 
   if (tmdbUrl) {
@@ -2219,7 +2219,7 @@ const handleSave = () => {
   });
 };
 
-const getTmdbImageUrl = (posterPath, size = 'w300') => posterPath ? `https://image.tmdb.org/t/p/${size}${posterPath}` : '/img/poster-placeholder.png';
+const getTmdbImageUrl = (posterPath, size = 'w300') => posterPath ? `https://wsrv.nl/?url=https://image.tmdb.org/t/p/${size}${posterPath}` : '/img/poster-placeholder.png';
 const extractYear = (dateStr) => dateStr ? dateStr.substring(0, 4) : null;
 
 const addDynamicRule = () => {

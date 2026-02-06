@@ -349,7 +349,7 @@ const getAvatarColor = (name) => {
 
 const getTMDbImageUrl = (path, size = 'w185') => {
   if (!path) return '';
-  return `https://image.tmdb.org/t/p/${size}${path}`;
+  return `https://wsrv.nl/?url=https://image.tmdb.org/t/p/${size}${path}`;
 };
 
 watch(() => itemDetails.value, (newItemDetails) => {

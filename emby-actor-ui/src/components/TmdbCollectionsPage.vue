@@ -638,10 +638,10 @@ const getCollectionPosterUrl = (posterPath) => {
   if (!posterPath) {
     return '/img/poster-placeholder.png';
   }
-  const fullTmdbUrl = `https://image.tmdb.org/t/p/w300${posterPath}`;
+  const fullTmdbUrl = `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w300${posterPath}`;
   return `/api/image_proxy?url=${encodeURIComponent(fullTmdbUrl)}`;
 };
-const getTmdbImageUrl = (posterPath) => posterPath ? `https://image.tmdb.org/t/p/w300${posterPath}` : '/img/poster-placeholder.png';
+const getTmdbImageUrl = (posterPath) => posterPath ? `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w300${posterPath}` : '/img/poster-placeholder.png';
 
 const extractYear = (dateStr) => {
   if (!dateStr) return null;

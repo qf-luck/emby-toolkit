@@ -120,7 +120,7 @@ class CoverGeneratorService:
                 if meta and meta.get('poster_path'):
                     poster_path = meta['poster_path']
                     # 构造完整 URL
-                    full_url = f"https://image.tmdb.org/t/p/w500{poster_path}"
+                    full_url = f"https://wsrv.nl/?url=https://image.tmdb.org/t/p/w500{poster_path}"
                     
                     # 下载
                     save_name = f"tmdb_{tmdb_id}.jpg"

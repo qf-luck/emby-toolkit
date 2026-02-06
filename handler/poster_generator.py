@@ -67,7 +67,7 @@ def get_missing_poster(tmdb_id, status, poster_path, release_date=None):
     img = None
     if poster_path:
         try:
-            resp = requests.get(f"https://image.tmdb.org/t/p/w500{poster_path}", timeout=5)
+            resp = requests.get(f"https://wsrv.nl/?url=https://image.tmdb.org/t/p/w500{poster_path}", timeout=5)
             img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
         except: pass
     

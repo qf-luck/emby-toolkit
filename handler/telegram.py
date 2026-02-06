@@ -198,9 +198,9 @@ def send_media_notification(item_details: dict, notification_type: str = 'new', 
 
                 if image_details:
                     if image_details.get('backdrop_path'):
-                        photo_url = f"https://image.tmdb.org/t/p/w780{image_details['backdrop_path']}"
+                        photo_url = f"https://wsrv.nl/?url=https://image.tmdb.org/t/p/w780{image_details['backdrop_path']}"
                     elif image_details.get('poster_path'):
-                        photo_url = f"https://image.tmdb.org/t/p/w500{image_details['poster_path']}"
+                        photo_url = f"https://wsrv.nl/?url=https://image.tmdb.org/t/p/w500{image_details['poster_path']}"
             except Exception as e:
                  logger.error(f"  ➜ [通知] 调用 tmdb_handler 获取图片信息时出错: {e}", exc_info=True)
         

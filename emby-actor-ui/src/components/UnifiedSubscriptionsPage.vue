@@ -903,7 +903,7 @@ const formatAirDate = (dateString) => {
   } catch (e) { return 'N/A'; }
 };
 
-const getPosterUrl = (posterPath) => posterPath ? `/api/image_proxy?url=https://image.tmdb.org/t/p/w500${posterPath}` : '/placeholder.png';
+const getPosterUrl = (posterPath) => posterPath ? `/api/image_proxy?url=https://wsrv.nl/?url=https://image.tmdb.org/t/p/w500${posterPath}` : '/placeholder.png';
 
 const statusInfo = (status) => {
   const map = {

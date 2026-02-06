@@ -113,7 +113,7 @@ const createColumns = () => {
       key: 'poster_path',
       width: 65,
       render(row) {
-        const url = row.poster_path ? `https://image.tmdb.org/t/p/w92${row.poster_path}` : 'https://via.placeholder.com/92x138.png?text=N/A';
+        const url = row.poster_path ? `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w92${row.poster_path}` : 'https://via.placeholder.com/92x138.png?text=N/A';
         return h(NImage, { src: url, width: "45", style: 'border-radius: 3px; display: block;' });
       }
     },

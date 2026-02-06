@@ -584,7 +584,7 @@ const resubscribeItem = async (item) => {
 };
 const getPosterUrl = (item) => {
   if (item.poster_path) {
-    return `https://image.tmdb.org/t/p/w500${item.poster_path}`;
+    return `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w500${item.poster_path}`;
   }
   return ''; 
 };

@@ -175,7 +175,7 @@
                 <div class="recommendation-grid">
                     <!-- ★ 左栏：海报 -->
                     <div class="poster-column">
-                        <img :src="`https://image.tmdb.org/t/p/w500${currentRecommendation.poster_path}`" class="recommendation-poster" />
+                        <img :src="`https://wsrv.nl/?url=https://image.tmdb.org/t/p/w500${currentRecommendation.poster_path}`" class="recommendation-poster" />
                     </div>
 
                     <!-- ★ 右栏：所有信息 -->
@@ -217,7 +217,7 @@
                     <div class="actor-list-container">
                         <div v-for="actor in currentRecommendation.cast" :key="actor.id" class="actor-card">
                             <img 
-                            :src="actor.profile_path ? `https://image.tmdb.org/t/p/w185${actor.profile_path}` : '/default-avatar.png'" 
+                            :src="actor.profile_path ? `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w185${actor.profile_path}` : '/default-avatar.png'"
                             class="actor-avatar"
                             @error="onImageError"
                             />
@@ -247,7 +247,7 @@
             <!-- 海报容器 (包含所有元素) -->
             <div class="poster-wrapper">
               <!-- 图片源保持 w300 或 w500 均可，视卡片大小而定 -->
-              <img :src="media.poster_path ? `https://image.tmdb.org/t/p/w300${media.poster_path}` : '/default-poster.png'" class="media-poster" @error="onImageError">
+              <img :src="media.poster_path ? `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w300${media.poster_path}` : '/default-poster.png'" class="media-poster" @error="onImageError">
               
               <!-- 1. 状态缎带 -->
               <div v-if="media.in_library" class="ribbon ribbon-green"><span>已入库</span></div>

@@ -318,7 +318,7 @@ const renderPersonLabel = (option) => {
         size: 'small',
         // 如果有 profile_path 就拼接 TMDb 图片地址，否则 undefined (显示默认占位)
         src: option.profile_path 
-             ? `https://image.tmdb.org/t/p/w45${option.profile_path}` 
+             ? `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w45${option.profile_path}`
              : undefined,
         style: {
           marginRight: '12px',

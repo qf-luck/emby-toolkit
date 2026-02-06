@@ -3496,7 +3496,7 @@ class MediaProcessor:
                             image_url = profile_path
                         # 否则，认为是 TMDb 的相对路径，进行拼接
                         else:
-                            image_url = f"https://image.tmdb.org/t/p/w185{profile_path}"
+                            image_url = f"https://wsrv.nl/?url=https://image.tmdb.org/t/p/w185{profile_path}"
                     
                     # 清理角色名
                     original_role = actor_data.get('character', '')
@@ -3846,7 +3846,7 @@ class MediaProcessor:
                         downloads.append((s_poster, f"season-{s_num}.jpg"))
 
             # 4. 执行下载
-            base_image_url = "https://image.tmdb.org/t/p/original"
+            base_image_url = "https://wsrv.nl/?url=https://image.tmdb.org/t/p/original"
             success_count = 0
             
             import requests

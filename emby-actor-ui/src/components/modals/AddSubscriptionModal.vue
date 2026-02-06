@@ -94,7 +94,7 @@ const searchActors = async () => {
 const debouncedSearch = useDebounceFn(searchActors, 300);
 
 const getImageUrl = (path) => {
-  return path ? `https://image.tmdb.org/t/p/w92${path}` : 'https://via.placeholder.com/92x138.png?text=N/A';
+  return path ? `https://wsrv.nl/?url=https://image.tmdb.org/t/p/w92${path}` : 'https://via.placeholder.com/92x138.png?text=N/A';
 };
 
 const handleSelectPerson = async (person) => {
