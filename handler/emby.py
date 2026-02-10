@@ -201,7 +201,7 @@ def wait_for_server_idle(base_url: str, api_key: str, max_wait_seconds: int = 30
             
             if is_ignored:
                 # 如果是忽略的任务，仅在调试日志里记录一下，不加入 busy_reasons
-                logger.debug(f"  [队列忽略] 跳过任务: {raw_name} (在忽略列表中)")
+                # logger.debug(f"  ➜ 忽略任务: {raw_name} 执行刷新请求。")
                 continue
             # ---------------------------------------
 
@@ -3123,7 +3123,7 @@ def get_playback_reporting_data(base_url: str, api_key: str, user_id: str, days:
         if cleaned_data:
             import json
             # 只打印第一条，防止日志刷屏
-            logger.info(f"🔍 [UserPlaylist] 数据获取成功，Count: {len(cleaned_data)} | Sample: {json.dumps(cleaned_data[0], ensure_ascii=False)}")
+            logger.debug(f"  🔍 [UserPlaylist] 数据获取成功，Count: {len(cleaned_data)} | Sample: {json.dumps(cleaned_data[0], ensure_ascii=False)}")
         else:
             logger.warning(f"🔍 [UserPlaylist] 请求成功但返回空列表 (User: {user_id})")
 
@@ -3133,85 +3133,80 @@ def get_playback_reporting_data(base_url: str, api_key: str, user_id: str, days:
         logger.error(f"获取个人播放数据失败: {e}")
         return {"error": str(e)}
 
-def get_global_popular_items(base_url: str, api_key: str, days: int = 30) -> dict:
+def get_global_popular_items(base_url: str, api_key: str, days: int = 30, media_type: str = 'all') -> dict:
     """
-    获取全局热门数据 (聚合逻辑优化版)
+    获取全局热门数据 (支持类型筛选)
     """
-    # 1. 构造 URL (适配不同的 Base URL 格式)
+    # 1. 构造 URL
+    endpoint = "/user_usage_stats/UserPlaylist"
     if "/emby" not in base_url:
-        api_url = f"{base_url.rstrip('/')}/emby/user_usage_stats/UserPlaylist"
+        api_url = f"{base_url.rstrip('/')}/emby{endpoint}"
     else:
-        api_url = f"{base_url.rstrip('/')}/user_usage_stats/UserPlaylist"
+        api_url = f"{base_url.rstrip('/')}{endpoint}"
     
-    # 2. 构造时间参数
-    start_date = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    
+    # 2. 复刻官方参数
     params = {
         "api_key": api_key,
-        "min_date": start_date,
-        "limit": 1000 # 获取足够多的记录用于聚合
+        "days": days,
+        "user_id": "",          
+        "aggregate_data": "false", 
+        "include_stats": "false",
+        "limit": 100000         
     }
     
     try:
-        response = emby_client.get(api_url, params=params, timeout=20)
+        response = emby_client.get(api_url, params=params, timeout=60)
         response.raise_for_status()
         raw_logs = response.json() 
 
-        # --- 核心：聚合逻辑 ---
-        # 使用字典来合并相同的条目
-        # Key = item_id (唯一标识)
+        # --- 本地聚合逻辑 ---
         stats = {}
         
         for log in raw_logs:
-            # 获取关键字段，兼容 snake_case (你的数据) 和 PascalCase
-            iid = log.get('item_id') or log.get('ItemId')
+            # 优先取 ItemId
+            iid = log.get('ItemId') or log.get('item_id')
             if not iid: continue
             
-            # 如果是第一次遇到这个项目，初始化
+            # --- ★★★ 新增：类型过滤逻辑 ★★★ ---
+            # 获取当前条目的类型
+            current_type = log.get("item_type") or log.get("Type") or "Video"
+            
+            # 如果指定了筛选类型，且当前类型不匹配，则跳过
+            if media_type != 'all':
+                # 特殊处理：如果筛选 'Video'，我们可能想包含 'Video' 和其他未定义的类型
+                # 但通常 Emby 类型很明确：Movie, Episode, Audio
+                if current_type != media_type:
+                    continue
+            # ----------------------------------
+
+            iid = str(iid)
+            
+            # 初始化
             if iid not in stats:
                 stats[iid] = {
                     "item_id": iid,
-                    "title": log.get("item_name") or log.get("Name") or "未知",
-                    "item_type": log.get("item_type") or log.get("Type") or "Video",
+                    "title": log.get("item_name") or log.get("Name") or log.get("ItemName") or "未知视频",
+                    "item_type": current_type,
                     "play_count": 0,
-                    "total_duration": 0,
-                    "image_tag": log.get("PrimaryImageTag") # 如果有的话
+                    "total_duration": 0
                 }
             
-            # 累加数据
-            item = stats[iid]
-            item["play_count"] += 1
+            # 累加
+            stats[iid]["play_count"] += 1
             
-            # 处理时长 (你的数据是字符串 "480")
             try:
                 duration_str = log.get("duration") or log.get("PlayDuration") or 0
-                item["total_duration"] += int(float(duration_str))
+                stats[iid]["total_duration"] += int(float(duration_str))
             except: 
                 pass
 
         # --- 排序与截取 ---
-        # 1. 字典转列表
         aggregated_list = list(stats.values())
-        
-        # 2. 按播放次数倒序排列
         aggregated_list.sort(key=lambda x: x["play_count"], reverse=True)
+        top_list = aggregated_list[:20]
         
-        # 3. 只取前 10 名
-        top_10 = aggregated_list[:10]
+        return {"data": top_list} 
         
-        # 4. 格式化时长 (秒 -> 分钟)，方便前端显示
-        for item in top_10:
-            total_seconds = item["total_duration"]
-            # 如果是单集，显示单集时长；如果是聚合，显示总时长
-            # 这里为了榜单好看，我们计算平均时长或者总时长
-            # 截图显示的是 "时长: 10分钟"，我们用总时长除以次数算平均，或者直接用单次时长
-            if item["play_count"] > 0:
-                avg_seconds = total_seconds / item["play_count"]
-                item["duration_minutes"] = int(avg_seconds / 60)
-            else:
-                item["duration_minutes"] = 0
-
-        return {"data": top_10} 
     except Exception as e:
         logger.error(f"获取全局热播数据失败: {e}")
         return {"error": str(e)}

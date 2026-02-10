@@ -1,7 +1,7 @@
 <!-- src/components/DatabaseStats.vue -->
 <template>
   <!-- ================================================================================== -->
-  <!-- 视图 A: PC 端 (宽屏) - 追求信息密度、整齐对齐、图表丰富 -->
+  <!-- 视图 A: PC 端 (宽屏) -->
   <!-- ================================================================================== -->
   <n-layout v-if="!isMobile" content-style="padding: 24px;">
     <div>
@@ -26,6 +26,7 @@
                   </n-statistic>
                 </n-gi>
                 <n-gi>
+                  <!-- 这里保持显示总归档数，代表数字资产总量 -->
                   <n-statistic label="已归档演员" class="centered-statistic">
                     <span class="stat-value">{{ stats.system.actor_mappings_total }}</span>
                   </n-statistic>
@@ -44,37 +45,54 @@
                   <n-gi>
                     <n-space vertical justify="center" style="height: 100%;">
                       <n-grid :cols="2" :x-gap="12" :y-gap="16">
-                        <n-gi><n-statistic label="电影" :value="stats.media_library.movies_in_library" /></n-gi>
-                        <n-gi><n-statistic label="剧集" :value="stats.media_library.series_in_library" /></n-gi>
-                        <n-gi><n-statistic label="总集数" :value="stats.media_library.episodes_in_library" /></n-gi>
+                        <!-- 电影 -->
                         <n-gi>
-                          <n-statistic label="预缓存">
+                          <n-statistic label="电影">
                             <template #prefix>
-                              <n-icon-wrapper :size="20" :border-radius="5" color="#FFCC3344">
-                                <n-icon :size="14" :component="FolderOpenOutline" color="#FFCC33" />
+                              <n-icon-wrapper :size="20" :border-radius="5" color="rgba(32, 128, 240, 0.15)">
+                                <n-icon :size="14" :component="FilmOutline" color="#2080f0" />
                               </n-icon-wrapper>
                             </template>
-                            {{ stats.media_library.missing_total }}
+                            {{ stats.media_library.movies_in_library }}
+                          </n-statistic>
+                        </n-gi>
+                        <!-- 剧集 -->
+                        <n-gi>
+                          <n-statistic label="剧集">
+                            <template #prefix>
+                              <n-icon-wrapper :size="20" :border-radius="5" color="rgba(24, 160, 88, 0.15)">
+                                <n-icon :size="14" :component="TvOutline" color="#18a058" />
+                              </n-icon-wrapper>
+                            </template>
+                            {{ stats.media_library.series_in_library }}
+                          </n-statistic>
+                        </n-gi>
+                        <!-- 总集数 -->
+                        <n-gi>
+                          <n-statistic label="总集数">
+                            <template #prefix>
+                              <n-icon-wrapper :size="20" :border-radius="5" color="rgba(240, 160, 32, 0.15)">
+                                <n-icon :size="14" :component="LayersOutline" color="#f0a020" />
+                              </n-icon-wrapper>
+                            </template>
+                            {{ stats.media_library.episodes_in_library }}
+                          </n-statistic>
+                        </n-gi>
+                        <!-- 演员 -->
+                        <n-gi>
+                          <n-statistic label="演员">
+                            <template #prefix>
+                              <n-icon-wrapper :size="20" :border-radius="5" color="rgba(100, 100, 100, 0.15)">
+                                <n-icon :size="14" :component="PersonOutline" color="#999" />
+                              </n-icon-wrapper>
+                            </template>
+                            {{ stats.system.actor_mappings_linked }}
                           </n-statistic>
                         </n-gi>
                       </n-grid>
                     </n-space>
                   </n-gi>
                 </n-grid>
-              </div>
-  
-              <!-- 演员关联进度 -->
-              <div>
-                <div class="section-title">演员关联进度</div>
-                <n-progress
-                  type="line"
-                  :percentage="actorMappingPercentage"
-                  indicator-placement="inside"
-                  processing
-                  :color="themeVars.primaryColor"
-                >
-                  {{ stats.system.actor_mappings_linked }} / {{ stats.system.actor_mappings_total }}
-                </n-progress>
               </div>
   
               <n-divider />
@@ -238,11 +256,11 @@
   </n-layout>
 
   <!-- ================================================================================== -->
-  <!-- 视图 B: Mobile 端 (手机) - 追求垂直流、卡片化、大触控区 -->
+  <!-- 视图 B: Mobile 端 (手机) -->
   <!-- ================================================================================== -->
   <n-layout v-else content-style="padding: 12px; background-color: transparent;">
     <div class="mobile-container">
-      <!-- 1. 核心数据概览 (小卡片并排) -->
+      <!-- 1. 核心数据概览 -->
       <n-grid :cols="2" :x-gap="12" :y-gap="12">
         <n-gi>
           <n-card size="small" :bordered="false" class="mobile-stat-card">
@@ -260,13 +278,51 @@
         </n-gi>
       </n-grid>
 
-      <!-- 2. 媒体库分布 (图表) -->
+      <!-- 2. 媒体库分布 (图表 + 统计) -->
       <n-card size="small" :bordered="false" title="媒体库分布" style="margin-top: 12px;">
         <v-chart class="chart" :option="resolutionChartOptions" autoresize style="height: 200px;" />
-        <n-grid :cols="3" style="text-align: center; margin-top: 10px;">
-          <n-gi><n-statistic label="电影" :value="stats.media_library.movies_in_library" /></n-gi>
-          <n-gi><n-statistic label="剧集" :value="stats.media_library.series_in_library" /></n-gi>
-          <n-gi><n-statistic label="总集数" :value="stats.media_library.episodes_in_library" /></n-gi>
+        <n-grid :cols="2" :x-gap="12" :y-gap="12" style="text-align: center; margin-top: 10px;">
+          <n-gi>
+            <n-statistic label="电影">
+              <template #prefix>
+                <n-icon-wrapper :size="16" :border-radius="4" color="rgba(32, 128, 240, 0.15)">
+                  <n-icon :size="12" :component="FilmOutline" color="#2080f0" />
+                </n-icon-wrapper>
+              </template>
+              {{ stats.media_library.movies_in_library }}
+            </n-statistic>
+          </n-gi>
+          <n-gi>
+            <n-statistic label="剧集">
+              <template #prefix>
+                <n-icon-wrapper :size="16" :border-radius="4" color="rgba(24, 160, 88, 0.15)">
+                  <n-icon :size="12" :component="TvOutline" color="#18a058" />
+                </n-icon-wrapper>
+              </template>
+              {{ stats.media_library.series_in_library }}
+            </n-statistic>
+          </n-gi>
+          <n-gi>
+            <n-statistic label="总集数">
+              <template #prefix>
+                <n-icon-wrapper :size="16" :border-radius="4" color="rgba(240, 160, 32, 0.15)">
+                  <n-icon :size="12" :component="LayersOutline" color="#f0a020" />
+                </n-icon-wrapper>
+              </template>
+              {{ stats.media_library.episodes_in_library }}
+            </n-statistic>
+          </n-gi>
+          <n-gi>
+            <n-statistic label="演员">
+              <template #prefix>
+                <n-icon-wrapper :size="16" :border-radius="4" color="rgba(100, 100, 100, 0.15)">
+                  <n-icon :size="12" :component="PersonOutline" color="#999" />
+                </n-icon-wrapper>
+              </template>
+              <!-- ★★★ 修正点：移动端也改为 actor_mappings_linked ★★★ -->
+              {{ stats.system.actor_mappings_linked }}
+            </n-statistic>
+          </n-gi>
         </n-grid>
       </n-card>
 
@@ -288,7 +344,7 @@
         </div>
       </n-card>
 
-      <!-- 4. 自动化任务 (列表式) -->
+      <!-- 4. 自动化任务 -->
       <n-card size="small" :bordered="false" title="自动化任务" style="margin-top: 12px;">
         <n-space vertical>
           <div class="mobile-row">
@@ -311,7 +367,7 @@
         </n-space>
       </n-card>
 
-      <!-- 5. 今日发布组 (简化列表) -->
+      <!-- 5. 今日发布组 -->
       <n-card size="small" :bordered="false" title="今日发布组 Top 5" style="margin-top: 12px;">
         <div v-if="stats.release_group_ranking.length === 0">
           <n-empty description="今日暂无" size="small" />
@@ -335,7 +391,8 @@ import {
   NPageHeader, NLayout, NGrid, NGi, NCard, NStatistic, NSpin, NIcon, NSpace, NDivider, NIconWrapper,
   NProgress, NEmpty, useThemeVars, NTag
 } from 'naive-ui';
-import { FolderOpenOutline } from '@vicons/ionicons5';
+// 引入所有需要的图标
+import { PersonOutline, FilmOutline, TvOutline, LayersOutline } from '@vicons/ionicons5';
 import { use } from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
 import { PieChart } from 'echarts/charts';
@@ -356,7 +413,7 @@ const loading = reactive({
 });
 
 const stats = reactive({
-  media_library: { cached_total: 0, movies_in_library: 0, series_in_library: 0, episodes_in_library: 0, missing_total: 0, resolution_stats: [] },
+  media_library: { cached_total: 0, movies_in_library: 0, series_in_library: 0, episodes_in_library: 0, resolution_stats: [] },
   system: { actor_mappings_total: 0, actor_mappings_linked: 0, actor_mappings_unlinked: 0, translation_cache_count: 0, processed_log_count: 0, failed_log_count: 0 },
   subscriptions_card: {
     watchlist: { watching: 0, paused: 0, completed: 0 },
@@ -389,7 +446,10 @@ const fetchLibrary = async () => {
 const fetchSystem = async () => {
   try {
     const res = await axios.get('/api/database/stats/system');
-    if (res.data.status === 'success') Object.assign(stats.system, res.data.data);
+    if (res.data.status === 'success') {
+      // 确保 actor_mappings_linked 被正确赋值
+      Object.assign(stats.system, res.data.data);
+    }
   } catch (e) { console.error(e); } finally { loading.system = false; }
 };
 const fetchSubscription = async () => {
@@ -409,12 +469,6 @@ const fetchRankings = async () => {
 };
 
 // --- 计算属性 ---
-const actorMappingPercentage = computed(() => {
-  const total = stats.system.actor_mappings_total || 1;
-  const linked = stats.system.actor_mappings_linked || 0;
-  return (linked / total) * 100;
-});
-
 const resolutionChartOptions = computed(() => {
   const chartData = stats.media_library.resolution_stats || [];
   if (!chartData.length) {

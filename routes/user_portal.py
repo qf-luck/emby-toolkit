@@ -1,9 +1,11 @@
 # routes/user_portal.py
 import logging
 import requests
+import re
 import threading
 from flask import Blueprint, jsonify, session, request
 from datetime import datetime, timedelta
+from collections import defaultdict
 
 from extensions import emby_login_required 
 from database import user_db, settings_db, media_db, request_db
@@ -14,6 +16,7 @@ import handler.emby as emby
 from handler.telegram import send_telegram_message
 from routes.discover import check_and_replenish_pool
 import task_manager
+import extensions
 from tasks.subscriptions import task_manual_subscribe_batch
 
 # 1. 创建一个新的蓝图
@@ -323,12 +326,17 @@ def upload_avatar():
 def get_playback_report():
     """
     获取播放统计报告 (个人流水 + 全局热榜)
+    支持参数: days (天数), media_type (筛选类型: all, Movie, Episode, Audio, Video)
     """
     emby_user_id = session['emby_user_id']
     days = request.args.get('days', 30, type=int)
+    media_type_filter = request.args.get('media_type', 'all')
+    
     config = config_manager.APP_CONFIG
     
-    # 1. 获取个人数据
+    # ==================================================
+    # 1. 获取 个人数据
+    # ==================================================
     personal_res = emby.get_playback_reporting_data(
         config['emby_server_url'], config['emby_api_key'], emby_user_id, days
     )
@@ -339,8 +347,64 @@ def get_playback_report():
         return jsonify({"status": "error", "message": "获取数据失败"}), 500
         
     raw_activity = personal_res.get("data", [])
-    
-    # --- 处理个人数据 ---
+
+    # 个人数据类型过滤
+    if media_type_filter != 'all':
+        filtered_activity = []
+        for item in raw_activity:
+            item_type = item.get("ItemType") or item.get("item_type") or "Video"
+            if item_type == media_type_filter:
+                filtered_activity.append(item)
+        raw_activity = filtered_activity
+
+    # ==================================================
+    # 2. 获取 全局数据 (提前获取，以便合并查询元数据)
+    # ==================================================
+    global_res = emby.get_global_popular_items(
+        config['emby_server_url'], config['emby_api_key'], days, 
+        media_type=media_type_filter
+    )
+    global_raw_list = global_res.get("data", [])
+
+    # ==================================================
+    # 3. 统一收集 Episode ID 进行批量回查
+    # ==================================================
+    episode_ids_to_fetch = set() # 使用集合去重
+
+    # A. 收集个人记录前20条中的剧集ID
+    top_20_personal = raw_activity[:20]
+    for item in top_20_personal:
+        item_id = str(item.get("ItemId") or item.get("item_id"))
+        item_type = item.get("ItemType") or item.get("item_type") or "Video"
+        if item_type == 'Episode' and item_id:
+            episode_ids_to_fetch.add(item_id)
+
+    # B. 收集全站热播中的剧集ID
+    for item in global_raw_list:
+        item_id = str(item.get("item_id"))
+        item_type = item.get("item_type") or "Video"
+        if item_type == 'Episode' and item_id:
+            episode_ids_to_fetch.add(item_id)
+
+    # C. 批量向 Emby 查询详情 (SeriesName, ParentIndexNumber, IndexNumber)
+    episode_details_map = {}
+    if episode_ids_to_fetch:
+        try:
+            details_list = emby.get_emby_items_by_id(
+                base_url=config['emby_server_url'],
+                api_key=config['emby_api_key'],
+                user_id=emby_user_id,
+                item_ids=list(episode_ids_to_fetch), # 转回列表
+                fields="SeriesName,ParentIndexNumber,IndexNumber,Name"
+            )
+            for d in details_list:
+                episode_details_map[d['Id']] = d
+        except Exception as e:
+            logger.error(f"批量回查集数详情失败: {e}")
+
+    # ==================================================
+    # 4. 格式化 个人数据
+    # ==================================================
     personal_stats = {
         "total_count": len(raw_activity),
         "total_minutes": 0,
@@ -348,58 +412,250 @@ def get_playback_report():
     }
     
     for item in raw_activity:
-        # ★★★ 兼容性修复：尝试多种字段名获取时长 ★★★
-        # PlayDuration 通常是秒
         duration_sec = item.get("PlayDuration") or item.get("Duration") or 0
-        duration_min = int(duration_sec / 60)
-        
-        personal_stats["total_minutes"] += duration_min
-        
-        # 构建历史列表 (只取前 20 条)
-        if len(personal_stats["history_list"]) < 20:
-            # ★★★ 兼容性修复：尝试多种字段名获取标题 ★★★
-            # 插件里有时叫 Name，有时叫 ItemName
-            raw_title = item.get("Name") or item.get("ItemName") or "未知影片"
-            series_name = item.get("SeriesName")
-            episode_name = item.get("EpisodeName")
-            
-            display_title = raw_title
-            # 如果有剧集名，拼凑一下
-            if series_name:
-                if episode_name:
-                    display_title = f"{series_name} - {episode_name}"
-                else:
-                    display_title = f"{series_name} - {raw_title}"
-            
-            # ★★★ 兼容性修复：尝试多种字段名获取日期 ★★★
-            date_str = item.get("DateCreated") or item.get("Date") or item.get("Time")
-            
-            personal_stats["history_list"].append({
-                "title": display_title,
-                "date": date_str,
-                "duration": duration_min,
-                "item_type": item.get("ItemType", "Video"),
-                "item_id": item.get("ItemId") or item.get("Id")
-            })
+        personal_stats["total_minutes"] += int(duration_sec / 60)
 
-    # 2. 获取全局热榜
-    global_res = emby.get_global_popular_items(
-        config['emby_server_url'], config['emby_api_key'], days
-    )
-    
+    # 辅助函数：智能格式化标题
+    def format_episode_title(item_id, item_type, original_title, details_map):
+        # 默认使用原始标题
+        final_title = original_title
+        
+        if item_type == 'Episode':
+            # 情况 A: ID 在 Emby 中存在 (元数据回查成功)
+            if item_id in details_map:
+                detail = details_map[item_id]
+                series_name = detail.get('SeriesName')
+                season_num = detail.get('ParentIndexNumber')
+                episode_num = detail.get('IndexNumber')
+                ep_name = detail.get('Name', '')
+
+                if series_name:
+                    # A1. 完美情况：季号、集号都有
+                    if season_num is not None and episode_num is not None:
+                        final_title = f"{series_name} - 第 {season_num} 季 - 第 {episode_num} 集"
+                    # A2. 摸鱼情况：有剧集名，但缺集号 (尝试从标题正则提取 SxxExx)
+                    else:
+                        # 尝试匹配 S01E15, s1e15, 1x15 等格式
+                        match = re.search(r'(?i)s(\d+)\s*e(\d+)', ep_name)
+                        if match:
+                            final_title = f"{series_name} - 第 {int(match.group(1))} 季 - 第 {int(match.group(2))} 集"
+                        else:
+                            # 实在提取不到，只能显示原始名称
+                            final_title = f"{series_name} - {ep_name}"
+            
+            # 情况 B: ID 在 Emby 中找不到 (幽灵数据/洗版)，尝试从原始标题“硬”提取
+            else:
+                # 假设原始标题格式为 "剧集名 - S01E05 - ..." 或包含 S01E05
+                match = re.search(r'(?i)s(\d+)\s*e(\d+)', original_title)
+                if match:
+                    # 尝试分离剧集名 (简单猜测：取 SxxExx 之前的部分)
+                    parts = re.split(r'(?i)\s*[-_]?\s*s\d+e\d+', original_title)
+                    if parts and parts[0].strip():
+                        guessed_series = parts[0].strip().rstrip(' -')
+                        final_title = f"{guessed_series} - 第 {int(match.group(1))} 季 - 第 {int(match.group(2))} 集"
+
+        return final_title
+
+    # 格式化列表 (个人)
+    for item in top_20_personal:
+        item_id = str(item.get("ItemId") or item.get("item_id"))
+        item_type = item.get("ItemType") or item.get("item_type") or "Video"
+        raw_title = item.get("Name") or item.get("item_name") or "未知影片"
+        
+        # ★★★ 调用智能格式化 ★★★
+        display_title = format_episode_title(item_id, item_type, raw_title, episode_details_map)
+
+        date_str = item.get("DateCreated") or item.get("Date") or item.get("date")
+        if item.get("time") and date_str and " " not in str(date_str):
+             date_str = f"{date_str} {item.get('time')}"
+
+        duration_sec = item.get("PlayDuration") or item.get("Duration") or item.get("duration") or 0
+        
+        personal_stats["history_list"].append({
+            "title": display_title,
+            "date": date_str,
+            "duration": int(float(duration_sec) / 60),
+            "item_type": item_type,
+            "item_id": item_id
+        })
+
+    # ==================================================
+    # 5. 格式化 全局数据
+    # ==================================================
     global_top_list = []
-    if "data" in global_res:
-        for item in global_res["data"]:
-            global_top_list.append({
-                "title": item.get("title"),
-                "play_count": item.get("play_count", 0),
-                # 关键：将秒转换为分钟，前端再除以 60 就会得到正确的小时数
-                "total_duration": int(item.get("total_duration", 0) / 60), 
-                "item_type": item.get("item_type"),
-                "item_id": item.get("item_id")
-            })
+    for item in global_raw_list:
+        item_id = str(item.get("item_id"))
+        item_type = item.get("item_type")
+        raw_title = item.get("title")
+        
+        # ★★★ 调用智能格式化 ★★★
+        display_title = format_episode_title(item_id, item_type, raw_title, episode_details_map)
+
+        global_top_list.append({
+            "title": display_title,
+            "play_count": item.get("play_count", 0),
+            "total_duration": int(item.get("total_duration", 0) / 60), 
+            "item_type": item_type,
+            "item_id": item_id
+        })
 
     return jsonify({
         "personal": personal_stats,
         "global_top": global_top_list
     })
+
+@user_portal_bp.route('/dashboard-stats', methods=['GET'])
+@emby_login_required
+def get_dashboard_stats():
+    """
+    获取仪表盘综合统计数据 (修复版：增强字段兼容性)
+    """
+    # 1. 参数处理
+    days = request.args.get('days', 30, type=int)
+    config = config_manager.APP_CONFIG
+    
+    # 2. 从 Emby 获取全站原始流水
+    endpoint = "/user_usage_stats/UserPlaylist"
+    base_url = config['emby_server_url']
+    api_url = f"{base_url.rstrip('/')}/emby{endpoint}" if "/emby" not in base_url else f"{base_url.rstrip('/')}{endpoint}"
+    
+    params = {
+        "api_key": config['emby_api_key'],
+        "days": days,
+        "user_id": "", # 全站
+        "include_stats": "true",
+        "limit": 100000 
+    }
+    
+    try:
+        response = requests.get(api_url, params=params, timeout=30)
+        response.raise_for_status()
+        raw_data = response.json()
+    except Exception as e:
+        logger.error(f"获取仪表盘数据失败: {e}")
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+    # 3. 数据聚合
+    server_id = extensions.EMBY_SERVER_ID
+    stats = {
+        "total_plays": 0,
+        "total_duration_hours": 0,
+        "active_users": 0,
+        "watched_items": 0,
+        "trend": {},      
+        "user_rank": {},  
+        "media_rank": [], 
+        "hourly_heat": defaultdict(int),
+        "emby_url": config.get('emby_public_url') or config.get('emby_server_url'),
+        "emby_server_id": server_id
+    }
+
+    user_set = set()
+    # item_set 存储聚合后的 ID (例如剧集 ID)，用于计算“观看了多少部剧/电影”
+    item_set = set()
+    
+    # media_counter 用于排行：Key = 聚合后的 TMDb ID
+    media_counter = {} 
+
+    # --- 阶段 1: 收集所有相关的 Emby ID ---
+    emby_ids_to_query = set()
+    valid_raw_items = []
+
+    for item in raw_data:
+        # 原始数据清洗
+        item_type = item.get("Type") or item.get("ItemType") or item.get("item_type") or "Video"
+        
+        # ★ 过滤：只处理电影和剧集 (Episode)
+        if item_type not in ['Movie', 'Episode']:
+            continue
+            
+        item_id = str(item.get("ItemId") or item.get("item_id"))
+        if item_id:
+            emby_ids_to_query.add(item_id)
+            valid_raw_items.append(item)
+
+    # --- 阶段 2: 批量查询本地数据库进行聚合 ---
+    # 返回映射: { '原始EmbyID': { 'id': 'TMDbID', 'name': '剧名', 'poster_path': '/xxx.jpg', 'type': 'Series', 'emby_id': '剧集EmbyID' } }
+    aggregation_map = media_db.get_dashboard_aggregation_map(list(emby_ids_to_query))
+
+    # --- 阶段 3: 统计 ---
+    for item in valid_raw_items:
+        # 基础数据
+        raw_duration = item.get("PlayDuration") or item.get("duration") or item.get("play_duration") or 0
+        try:
+            duration_sec = float(raw_duration)
+        except:
+            duration_sec = 0
+        duration_hours = duration_sec / 3600
+        
+        raw_date = item.get("DateCreated") or item.get("Date") or item.get("date") or ""
+        date_str = raw_date[:10] if raw_date else "Unknown"
+        
+        user_name = item.get("UserName") or item.get("User") or item.get("user_name") or item.get("user") or "Unknown"
+        raw_emby_id = str(item.get("ItemId") or item.get("item_id"))
+
+        # 1. 顶部卡片 & 趋势 & 用户排行 (这些基于原始播放行为，不需要聚合)
+        stats["total_plays"] += 1
+        stats["total_duration_hours"] += duration_hours
+        if user_name != "Unknown":
+            user_set.add(user_name)
+        
+        if date_str != "Unknown":
+            if date_str not in stats["trend"]:
+                stats["trend"][date_str] = {"count": 0, "hours": 0}
+            stats["trend"][date_str]["count"] += 1
+            stats["trend"][date_str]["hours"] += duration_hours
+
+        if user_name != "Unknown":
+            if user_name not in stats["user_rank"]:
+                stats["user_rank"][user_name] = 0
+            stats["user_rank"][user_name] += duration_hours
+
+        # 2. 媒体排行 (核心：使用聚合后的数据)
+        # 只有在本地数据库查到了聚合信息，才计入排行
+        if raw_emby_id in aggregation_map:
+            info = aggregation_map[raw_emby_id]
+            target_tmdb_id = info['id']
+            
+            # 记录“观看内容”数量 (去重)
+            item_set.add(target_tmdb_id)
+
+            if target_tmdb_id not in media_counter:
+                media_counter[target_tmdb_id] = {
+                    "id": info['emby_id'], # ★ 前端跳转用聚合后的 Emby ID (剧集ID)
+                    "name": info['name'],
+                    "type": info['type'],
+                    "poster_path": info['poster_path'], # ★ 使用 TMDb 海报路径
+                    "count": 0
+                }
+            media_counter[target_tmdb_id]["count"] += 1
+
+    # 4. 格式化输出 (保持不变)
+    stats["total_duration_hours"] = round(stats["total_duration_hours"], 2)
+    stats["active_users"] = len(user_set)
+    stats["watched_items"] = len(item_set)
+
+    # 趋势图
+    sorted_dates = sorted(stats["trend"].keys())
+    if len(sorted_dates) > days + 5: 
+        sorted_dates = sorted_dates[-(days):]
+    stats["chart_trend"] = {
+        "dates": sorted_dates,
+        "counts": [stats["trend"][d]["count"] for d in sorted_dates],
+        "hours": [round(stats["trend"][d]["hours"], 1) for d in sorted_dates]
+    }
+    del stats["trend"]
+
+    # 用户排行
+    sorted_users = sorted(stats["user_rank"].items(), key=lambda x: x[1], reverse=True)
+    stats["chart_users"] = {
+        "names": [u[0] for u in sorted_users[:10]], 
+        "hours": [round(u[1], 1) for u in sorted_users[:10]]
+    }
+    del stats["user_rank"]
+
+    # 媒体排行
+    sorted_media = sorted(media_counter.values(), key=lambda x: x["count"], reverse=True)
+    stats["media_rank"] = sorted_media[:20]
+
+    return jsonify(stats)

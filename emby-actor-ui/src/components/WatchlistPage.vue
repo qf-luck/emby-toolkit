@@ -439,14 +439,46 @@
               <div class="setting-icon"><n-icon :component="PausedIcon" /></div>
               <div class="setting-content">
                 <div class="setting-header">
-                  <div class="setting-label">自动暂停</div>
-                  <n-switch v-model:value="watchlistConfig.auto_pause" size="small">
-                    <template #checked>开启</template>
-                    <template #unchecked>关闭</template>
-                  </n-switch>
+                  <div class="setting-label">
+                    自动暂停
+                    <!-- 加个小标签提示当前状态，直观一点 -->
+                    <n-tag 
+                      v-if="watchlistConfig.auto_pause === 0" 
+                      :bordered="false" 
+                      type="error" 
+                      size="small" 
+                      style="margin-left: 8px; transform: scale(0.85);"
+                    >
+                      已关闭
+                    </n-tag>
+                    <n-tag 
+                      v-else 
+                      :bordered="false" 
+                      type="success" 
+                      size="small" 
+                      style="margin-left: 8px; transform: scale(0.85);"
+                    >
+                      已开启
+                    </n-tag>
+                  </div>
+                  
+                  <!-- 直接放输入框，去掉 Switch -->
+                  <n-input-number 
+                    v-model:value="watchlistConfig.auto_pause" 
+                    size="small" 
+                    style="width: 150px" 
+                    placeholder="0=关闭"
+                    :min="0"
+                  >
+                    <template #suffix>天</template>
+                  </n-input-number>
                 </div>
+                
                 <div class="setting-desc">
-                  当下一集播出时间在 3 天以后时，自动将状态设为“暂停”，减少无效的搜索请求。
+                  当下一集播出时间在指定天数以后时，自动将状态设为“暂停”。<br/>
+                  <span style="color: var(--n-text-color-3); font-size: 12px;">
+                    * 设置为 0 即关闭此功能；设置为 3 表示若下一集在 3 天后才播，则暂停MP订阅。
+                  </span>
                 </div>
               </div>
             </div>
@@ -561,7 +593,7 @@
                   </n-switch>
                 </div>
                 <div class="setting-desc">
-                  当发现 MoviePilot 中缺失活跃订阅时自动补订。
+                  当发现 MoviePilot 中缺失在追剧订阅时自动补订。
                 </div>
               </div>
             </div>
@@ -659,7 +691,7 @@ const watchlistConfig = ref({
       episodes: 1, 
       default_total_episodes: 99
   },
-  auto_pause: false,
+  auto_pause: 0,
   auto_resub_ended: false,
   auto_delete_old_files: false,
   auto_delete_mp_history: false,     
@@ -681,7 +713,7 @@ const openConfigModal = async () => {
            episodes: data.auto_pending?.episodes ?? 1,
            default_total_episodes: data.auto_pending?.default_total_episodes ?? 99
          },
-         auto_pause: data.auto_pause ?? false,
+         auto_pause: data.auto_pause ?? 0,
          auto_resub_ended: data.auto_resub_ended ?? false,
          auto_delete_old_files: data.auto_delete_old_files ?? false,
          auto_delete_mp_history: data.auto_delete_mp_history ?? false,

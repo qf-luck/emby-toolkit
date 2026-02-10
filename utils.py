@@ -284,6 +284,7 @@ DEFAULT_STUDIO_MAPPING = [
     {"label": "爱奇艺", "en": ["iQiyi"], "network_ids": [1330]},
     {"label": "优酷", "en": ["Youku"], "network_ids": [1419]},
     {"label": "芒果TV", "en": ["Mango TV"], "network_ids": [1631]},
+    {"label": "哔哩哔哩", "en": ["Bilibili"], "network_ids": [1605]},
     {"label": "TVB", "en": ["TVB Jade", "Television Broadcasts Limited"], "network_ids": [48, 79261]},
 
     # --- 全球流媒体/电视网 (Network + Company) ---
@@ -294,6 +295,7 @@ DEFAULT_STUDIO_MAPPING = [
     {"label": "苹果TV", "en": ["Apple TV+"], "network_ids": [2552], "company_ids": [108568]},
     {"label": "亚马逊", "en": ["Amazon Prime Video"], "network_ids": [1024], "company_ids": [20555]},
     {"label": "Hulu", "en": ["Hulu"], "network_ids": [453], "company_ids": [15365]},
+    {"label": "正午阳光", "en": ["Daylight Entertainment"], "network_ids": [148869], "company_ids": [148869]},
 
     # --- 传统制作公司 (纯 Company) ---
     {"label": "二十世纪影业", "en": ["20th century fox"], "company_ids": [25]},
@@ -305,13 +307,21 @@ DEFAULT_STUDIO_MAPPING = [
     {"label": "米高梅", "en": ["Metro-Goldwyn-Mayer"], "company_ids": [21]},
     {"label": "狮门影业", "en": ["Lionsgate"], "company_ids": [1632]}, 
     {"label": "传奇影业", "en": ["Legendary Pictures", "Legendary Entertainment"], "company_ids": [923]},
+    {"label": "试金石影业", "en": ["Touchstone Pictures"], "company_ids": [9195]},
     {"label": "漫威", "en": ["Marvel Studios", "Marvel Entertainment"], "company_ids": [420, 7505]},
     {"label": "DC", "en": ["DC"], "company_ids": [128064, 9993]},
     {"label": "皮克斯", "en": ["Pixar"], "company_ids": [3]},
     {"label": "梦工厂", "en": ["DreamWorks Animation", "DreamWorks"], "company_ids": [521]},
     {"label": "吉卜力", "en": ["Studio Ghibli"], "company_ids": [10342]},
-    {"label": "正午阳光", "en": ["Daylight Entertainment"], "company_ids": [74209]},
-    {"label": "A24", "en": ["A24"], "company_ids": [41077]},
+    {"label": "中国电影集团", "en": ["China Film Group"], "company_ids": [14714]},
+    {"label": "登峰国际", "en": ["DF Pictures"], "company_ids": [65442]},
+    {"label": "光线影业", "en": ["Beijing Enlight Pictures"], "company_ids": [17818]},
+    {"label": "万达影业", "en": ["Wanda Pictures"], "company_ids": [78952]},
+    {"label": "博纳影业", "en": ["Bonanza Pictures"], "company_ids": [30148]},
+    {"label": "阿里影业", "en": ["Alibaba Pictures Group"], "company_ids": [69484]},
+    {"label": "上影", "en": ["Shanghai Film Group"], "company_ids": [3407]},
+    {"label": "华谊兄弟", "en": ["Huayi Brothers"], "company_ids": [76634]},
+    {"label": "寰亚电影", "en": ["Media Asia Films"], "company_ids": [5552]},
 ]
 
 # --- 国家预设表 ---

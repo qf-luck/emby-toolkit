@@ -746,7 +746,8 @@ class WatchlistProcessor:
         """
         try:
             watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
-            enable_auto_pause = watchlist_cfg.get('auto_pause', False)
+            auto_pause_days = int(watchlist_cfg.get('auto_pause', 0))
+            enable_auto_pause = auto_pause_days > 0
             auto_pending_cfg = watchlist_cfg.get('auto_pending', {})
             enable_sync_sub = watchlist_cfg.get('sync_mp_subscription', False)
             
@@ -778,7 +779,7 @@ class WatchlistProcessor:
                 # --- A. 检查订阅是否存在 ---
                 exists = moviepilot.check_subscription_exists(tmdb_id, 'Series', self.config, season=s_num)
                 
-                # --- B. 自动补订逻辑 (核心修改) ---
+                # --- B. 自动补订逻辑 ---
                 if not exists:
                     if not self.config.get(constants.CONFIG_OPTION_AUTOSUB_ENABLED):
                         return
@@ -892,7 +893,7 @@ class WatchlistProcessor:
                 # 获取唯一的那个规格，用于日志展示
                 res = list(resolutions)[0]
                 grp = list(groups)[0]
-                logger.info(f"  ✅ [一致性检查] S{season_number} 完美达标 (集齐且统一): [{res} / {grp}]，跳过洗版。")
+                logger.info(f"  ✅ [一致性检查] S{season_number} 完美达标: [{res} / {grp}]，跳过洗版。")
                 return True
             else:
                 logger.info(f"  ⚠️ [一致性检查] S{season_number} 版本混杂，需要洗版。分布: 分辨率{resolutions}, 制作组{groups}, 编码{codecs}")
@@ -904,7 +905,7 @@ class WatchlistProcessor:
 
     def _handle_auto_resub_ended(self, tmdb_id: str, series_name: str, season_number: int, episode_count: int):
         """
-        【重构版】针对指定季进行完结洗版。
+        针对指定季进行完结洗版。
         参数直接传入季号和集数，不再需要在内部计算。
         """
         try:
@@ -934,17 +935,16 @@ class WatchlistProcessor:
                 except Exception as e:
                     logger.error(f"  ❌ [自动清理] 执行删除逻辑时出错: {e}")
 
-            # 4. 删除整理记录 (MoviePilot) - 新增开关控制
+            # 4. 删除整理记录 (MoviePilot) - 
             related_hashes = []
             if watchlist_cfg.get('auto_delete_mp_history', False):
                 logger.info(f"  🗑️ [自动清理] 正在删除 MoviePilot 整理记录...")
                 related_hashes = moviepilot.delete_transfer_history(tmdb_id, season_number, series_name, self.config)
 
-            # 5. 清理下载器中的旧任务 - 新增开关控制
-            if watchlist_cfg.get('auto_delete_download_tasks', False):
-                logger.info(f"  🗑️ [自动清理] 正在删除下载器旧任务...")
-                # 如果第4步没开，related_hashes 为空，delete_download_tasks 内部应有处理逻辑(如按名字删)或仅跳过hash删除
-                moviepilot.delete_download_tasks(series_name, self.config, hashes=related_hashes)
+                # 5. 清理下载器中的旧任务 -
+                if watchlist_cfg.get('auto_delete_download_tasks', False):
+                    logger.info(f"  🗑️ [自动清理] 正在删除下载器旧任务...")
+                    moviepilot.delete_download_tasks(series_name, self.config, hashes=related_hashes)
 
             # 6. 取消旧订阅
             moviepilot.cancel_subscription(tmdb_id, 'Series', self.config, season=season_number)
@@ -986,7 +986,8 @@ class WatchlistProcessor:
         watchlist_cfg = settings_db.get_setting('watchlist_config') or {}
         auto_pending_cfg = watchlist_cfg.get('auto_pending', {})
         aggressive_threshold = int(auto_pending_cfg.get('episodes', 5)) 
-        enable_auto_pause = watchlist_cfg.get('auto_pause', False)
+        auto_pause_days = int(watchlist_cfg.get('auto_pause', 0))
+        enable_auto_pause = auto_pause_days > 0
 
         # 调用通用辅助函数刷新元数据
         refresh_result = self._refresh_series_metadata(tmdb_id, item_name, item_id)
@@ -1201,11 +1202,11 @@ class WatchlistProcessor:
                 
                 # --- 只有本地有该季文件，才根据时间判断是追剧还是暂停 ---
                 else:
-                    # 子规则 A: 3天后才播出  -> 设为“暂停”
-                    if days_until_air >= 1 and enable_auto_pause:
+                    # 子规则 A: 播出时间 >= 设定天数 -> 设为“暂停”
+                    if enable_auto_pause and days_until_air >= auto_pause_days:
                         final_status = STATUS_PAUSED
                         paused_until_date = air_date
-                        logger.info(f"  ⏸️ [判定-连载中] (第 {episode_number} 集) 将在 {days_until_air} 天后播出，设为“已暂停”。")
+                        logger.info(f"  ⏸️ [判定-连载中] (第 {episode_number} 集) 将在 {days_until_air} 天后播出 (阈值: {auto_pause_days}天)，设为“已暂停”。")
                     # 子规则 B: 即将播出 -> 设为“追剧中”
                     else:
                         final_status = STATUS_WATCHING
