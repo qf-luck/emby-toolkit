@@ -350,49 +350,94 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
     return filtered_list
 
 # ==============================================================================
-# ★★★ 115 推送逻辑 (保持不变) ★★★
+# ★★★ 115 推送逻辑  ★★★
 # ==============================================================================
 
 def _clean_link(link):
-    if not link: return ""
+    """
+    清洗链接：去除首尾空格，并安全去除末尾的 HTML 脏字符 (&#)
+    """
+    if not link:
+        return ""
     link = link.strip()
     while link.endswith('&#') or link.endswith('&') or link.endswith('#'):
-        if link.endswith('&#'): link = link[:-2]
-        elif link.endswith('&') or link.endswith('#'): link = link[:-1]
+        if link.endswith('&#'):
+            link = link[:-2]
+        elif link.endswith('&') or link.endswith('#'):
+            link = link[:-1]
     return link
 
 def notify_cms_scan():
+    """
+    通知 CMS 执行目录整理 (生成 strm)
+    接口: /api/sync/lift_by_token?type=auto_organize&token=...
+    """
     config = get_config()
     cms_url = config.get('cms_url')
     cms_token = config.get('cms_token')
-    if not cms_url or not cms_token: return
 
-    api_url = f"{cms_url.rstrip('/')}/api/sync/lift_by_token"
+    if not cms_url or not cms_token:
+        # 用户没配置 CMS，直接忽略，不报错
+        return
+
+    cms_url = cms_url.rstrip('/')
+    # 构造通知接口 URL
+    api_url = f"{cms_url}/api/sync/lift_by_token"
+    params = {
+        "type": "auto_organize",
+        "token": cms_token
+    }
+
     try:
-        requests.get(api_url, params={"type": "auto_organize", "token": cms_token}, timeout=5)
+        logger.info(f"  ➜ 正在通知 CMS 执行整理...")
+        response = requests.get(api_url, params=params, timeout=5)
+        response.raise_for_status()
+        
+        res_json = response.json()
+        if res_json.get('code') == 200 or res_json.get('success'):
+            logger.info(f"  ✅ CMS 通知成功: {res_json.get('msg', 'OK')}")
+        else:
+            logger.warning(f"  ⚠️ CMS 通知返回异常: {res_json}")
+
     except Exception as e:
-        logger.warning(f"CMS 通知发送失败: {e}")
+        logger.warning(f"  ⚠️ CMS 通知发送失败: {e}")
+        raise e
 
 def push_to_115(resource_link, title):
-    if P115Client is None: raise ImportError("未安装 p115 库")
+    """
+    智能推送：支持 115/115cdn/anxia 转存 和 磁力离线
+    """
+    if P115Client is None:
+        raise ImportError("未安装 p115 库")
+
     config = get_config()
     cookies = config.get('p115_cookies')
-    save_path_cid = int(config.get('p115_save_path_cid', 0) or 0)
+    
+    try:
+        cid_val = config.get('p115_save_path_cid', 0)
+        save_path_cid = int(cid_val) if cid_val else 0
+    except:
+        save_path_cid = 0
 
-    if not cookies: raise ValueError("未配置 115 Cookies")
+    if not cookies:
+        raise ValueError("未配置 115 Cookies")
+
     clean_url = _clean_link(resource_link)
+    logger.info(f"  ➜ [NULLBR] 待处理链接: {clean_url}")
+    
     client = P115Client(cookies)
     
     try:
+        # 支持 115.com, 115cdn.com, anxia.com
         target_domains = ['115.com', '115cdn.com', 'anxia.com']
         is_115_share = any(d in clean_url for d in target_domains) and ('magnet' not in clean_url)
         
         if is_115_share:
-            # 115 转存
+            logger.info(f"  ➜ [NULLBR] 识别为 115 转存任务 -> CID: {save_path_cid}")
             share_code = None
             match = re.search(r'/s/([a-z0-9]+)', clean_url)
             if match: share_code = match.group(1)
-            if not share_code: raise Exception("无法提取分享码")
+            if not share_code: raise Exception("无法从链接中提取分享码")
             receive_code = ''
             pwd_match = re.search(r'password=([a-z0-9]+)', clean_url)
             if pwd_match: receive_code = pwd_match.group(1)
@@ -403,6 +448,8 @@ def push_to_115(resource_link, title):
                      resp = client.fs_share_import_to_dir(share_code, receive_code, save_path_cid)
                 elif hasattr(client, 'fs_share_import'):
                     resp = client.fs_share_import(share_code, receive_code, save_path_cid)
+                elif hasattr(client, 'share_import'):
+                    resp = client.share_import(share_code, receive_code, save_path_cid)
                 else:
                     api_url = "https://webapi.115.com/share/receive"
                     payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': save_path_cid}
@@ -411,109 +458,207 @@ def push_to_115(resource_link, title):
             except Exception as e:
                 raise Exception(f"调用转存接口失败: {e}")
 
-            if resp and resp.get('state'): return True
-            else: raise Exception(f"转存失败: {resp}")
+            if resp and resp.get('state'):
+                logger.info(f"  ✅ 115 转存成功: {title}")
+                return True
+            else:
+                err = resp.get('error_msg') if resp else '无响应'
+                err = err or resp.get('msg') or str(resp)
+                raise Exception(f"转存失败: {err}")
 
         else:
-            # 离线下载 (指纹对比)
+            # ==================================================
+            # ★★★ 磁力/Ed2k 离线下载 (指纹对比版) ★★★
+            # ==================================================
+            logger.info(f"  ➜ [NULLBR] 识别为磁力/离线任务 -> CID: {save_path_cid}")
+            
+            # 1. 【关键步骤】建立快照：记录当前目录下已存在文件的 pick_code
             existing_pick_codes = set()
             try:
+                # 获取前50个文件/文件夹 (按上传时间倒序)
+                # 注意：115 API 返回的 pc (pick_code) 是唯一标识
                 files_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
                 if files_res.get('data'):
                     for item in files_res['data']:
-                        if item.get('pc'): existing_pick_codes.add(item.get('pc'))
-            except: pass
+                        if item.get('pc'):
+                            existing_pick_codes.add(item.get('pc'))
+            except Exception as e:
+                logger.warning(f"  ⚠️ 获取目录快照失败(可能是空目录): {e}")
             
+            logger.info(f"  ➜ [NULLBR] 当前目录已有 {len(existing_pick_codes)} 个项目")
+
+            # 2. 添加任务
             payload = {'url[0]': clean_url, 'wp_path_id': save_path_cid}
             resp = client.offline_add_urls(payload)
             
             if resp.get('state'):
+                # 获取 info_hash 用于辅助检查死链
                 result_list = resp.get('result', [])
-                info_hash = result_list[0].get('info_hash') if result_list else None
-                
+                info_hash = None
+                if result_list and isinstance(result_list, list):
+                    info_hash = result_list[0].get('info_hash')
+
+                # 3. 轮询检测目录 (延长到 45秒)
+                # 文件夹生成比较慢，给足时间
+                max_retries = 3  # 15次 * 3秒 = 45秒
                 success_found = False
-                for i in range(3): # 检查3次
+                
+                logger.info(f"  ➜ [NULLBR] 任务已提交，正在扫描新项目...")
+
+                for i in range(max_retries):
                     time.sleep(3) 
+                    
+                    # --- A. 检查目录是否有【不在快照里】的新项目 ---
                     try:
                         check_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
                         if check_res.get('data'):
                             for item in check_res['data']:
-                                if item.get('pc') and (item.get('pc') not in existing_pick_codes):
+                                current_pc = item.get('pc')
+                                # 如果发现一个 pick_code 不在旧集合里，说明是新生成的
+                                if current_pc and (current_pc not in existing_pick_codes):
+                                    item_name = item.get('n', '未知')
+                                    logger.info(f"  ✅ [第{i+1}次检查] 发现新项目: {item_name}")
                                     success_found = True
                                     break
-                        if success_found: break
-                    except: pass
-                    
-                    # 检查任务失败
+                        if success_found:
+                            break
+                    except Exception as e:
+                        pass # 网络波动忽略
+
+                    # --- B. 辅助检查：任务是否挂了 ---
                     try:
                         list_resp = client.offline_list(page=1)
-                        for task in list_resp.get('tasks', [])[:10]:
-                            if info_hash and task.get('info_hash') == info_hash and task.get('status') == -1:
-                                try: client.offline_delete([info_hash])
-                                except: pass
-                                raise Exception("115任务下载失败")
-                    except Exception as te:
-                        if "下载失败" in str(te): raise te
+                        tasks = list_resp.get('tasks', [])
+                        for task in tasks[:10]:
+                            if info_hash and task.get('info_hash') == info_hash:
+                                if task.get('status') == -1:
+                                    try: client.offline_delete([task.get('info_hash')])
+                                    except: pass
+                                    raise Exception("115任务状态变为[下载失败]")
+                    except Exception as task_err:
+                        if "下载失败" in str(task_err): raise task_err
+                        pass
 
-                if success_found: return True
+                if success_found:
+                    logger.info(f"  ✅ [NULLBR] 115 离线成功: {title}")
+                    return True
                 else:
+                    # 超时未发现新文件
                     try: 
                         if info_hash: client.offline_delete([info_hash])
                     except: pass
-                    raise Exception("资源无效或下载过慢")
+                    
+                    logger.warning(f"  [NULLBR] ❌ 未在目录发现新项目，判定为死链")
+                    raise Exception("资源无效，请换个源试试")
+
             else:
-                err = resp.get('error_msg') or resp.get('msg')
-                if '已存在' in str(err): return True
+                err = resp.get('error_msg') or resp.get('msg') or '未知错误'
+                if '已存在' in str(err):
+                    logger.info(f"  ✅ 任务已存在: {title}")
+                    return True
                 raise Exception(f"离线失败: {err}")
 
     except Exception as e:
-        logger.error(f"115 推送异常: {e}")
-        if "Login" in str(e) or "cookie" in str(e).lower(): raise Exception("115 Cookie 无效")
+        logger.error(f"  ➜ 115 推送异常: {e}")
+        if "Login" in str(e) or "cookie" in str(e).lower():
+            raise Exception("115 Cookie 无效")
         raise e
 
 def get_115_account_info():
-    if P115Client is None: raise Exception("未安装 p115client")
+    """
+    极简状态检查：只验证 Cookie 是否有效，不获取任何详情
+    """
+    if P115Client is None:
+        raise Exception("未安装 p115client")
+        
     config = get_config()
     cookies = config.get('p115_cookies')
-    if not cookies: raise Exception("未配置 Cookies")
+    
+    if not cookies:
+        raise Exception("未配置 Cookies")
+        
     try:
         client = P115Client(cookies)
+        
+        # 尝试列出 1 个文件，这是验证 Cookie 最快最准的方法
         resp = client.fs_files({'limit': 1})
-        if not resp.get('state'): raise Exception("Cookie 已失效")
-        return {"valid": True, "msg": "Cookie 状态正常"}
-    except Exception:
+        
+        if not resp.get('state'):
+            raise Exception("Cookie 已失效")
+            
+        # 只要没报错，就是有效
+        return {
+            "valid": True,
+            "msg": "Cookie 状态正常，可正常推送"
+        }
+
+    except Exception as e:
         raise Exception("Cookie 无效或网络不通")
 
 def handle_push_request(link, title):
+    """
+    统一推送入口
+    """
+    # 1. 推送到 115 (如果失败或死链，这里会直接抛出异常，中断流程)
     push_to_115(link, title)
+    
+    # 2. 115 成功后，通知 CMS 整理
     notify_cms_scan()
+    
     return True
 
 def auto_download_best_resource(tmdb_id, media_type, title, season_number=None):
+    """
+    [自动任务专用] 搜索并下载最佳资源
+    :param season_number: 季号 (仅 media_type='tv' 时有效)
+    """
     try:
         config = get_config()
-        if not config.get('api_key'): return False
-        
-        # 自动任务前先更新一下用户信息，确保有配额
-        try: get_user_info()
-        except: pass
+        if not config.get('api_key'):
+            logger.warning("NULLBR 未配置 API Key，无法执行自动兜底。")
+            return False
 
         priority_sources = ['115', 'magnet', 'ed2k']
         user_enabled = config.get('enabled_sources', priority_sources)
         
+        # 构造日志标题
+        log_title = title
+        if media_type == 'tv' and season_number:
+            log_title = f"《{title}》第 {season_number} 季"
+
+        logger.info(f"  ➜ [NULLBR] 开始搜索资源: {log_title} (ID: {tmdb_id})")
+
         for source in priority_sources:
             if source not in user_enabled: continue
             if media_type == 'tv' and source == 'ed2k': continue
 
             resources = fetch_resource_list(tmdb_id, media_type, specific_source=source, season_number=season_number)
-            if not resources: continue
+            
+            if not resources:
+                continue
 
-            for res in resources:
+            logger.info(f"  ➜ [{source.upper()}] 找到 {len(resources)} 个资源，开始尝试推送...")
+
+            for index, res in enumerate(resources):
                 try:
+                    logger.info(f"  👉 尝试第 {index + 1} 个资源: {res['title']}")
+                    
+                    # 调用统一推送入口 (115 -> CMS Notify)
                     handle_push_request(res['link'], title)
+                    
+                    logger.info(f"  ✅ 资源推送成功，停止后续尝试。")
                     return True
-                except: continue
+                    
+                except Exception as e:
+                    logger.warning(f"  ❌ 第 {index + 1} 个资源推送失败: {e}")
+                    logger.info("  🔄 正在尝试下一个资源...")
+                    continue
+            
+            logger.info(f"  ⚠️ [{source.upper()}] 所有资源均尝试失败，切换下一源...")
+
+        logger.info(f"  ❌ 所有源的所有资源均尝试失败: {log_title}")
         return False
+
     except Exception as e:
-        logger.error(f"NULLBR 自动兜底失败: {e}")
+        logger.error(f"  ➜ NULLBR 自动兜底失败: {e}")
         return False

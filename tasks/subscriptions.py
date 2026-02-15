@@ -441,7 +441,7 @@ def task_auto_subscribe(processor):
                 logger.warning(f"  ➜ 发现 {len(stale_items)} 个超时订阅，准备处理。")
                 cancelled_ids_map = {} 
                 cancelled_for_report = []
-                fallback_success_report = [] # ★★★ 新增：用于记录兜底成功的项目
+                fallback_success_report = [] 
 
                 for item in stale_items:
                     tmdb_id_to_cancel = item['tmdb_id']
@@ -461,7 +461,7 @@ def task_auto_subscribe(processor):
 
                     # ★★★ NULLBR 兜底逻辑 ★★★
                     if enable_nullbr_fallback and item_type == 'Movie':
-                        logger.info(f"  🚑 尝试对老片《{title}》执行 NULLBR 兜底搜索...")
+                        logger.info(f"  🚑 尝试对《{title}》执行 NULLBR 兜底搜索...")
                         if nullbr_handler.auto_download_best_resource(tmdb_id_to_cancel, 'movie', title):
                             logger.info(f"  ✅ 《{title}》NULLBR 兜底推送成功！")
                             is_fallback_success = True
@@ -526,7 +526,7 @@ def task_auto_subscribe(processor):
                         for admin_id in admin_chat_ids:
                             telegram.send_telegram_message(admin_id, message_text, disable_notification=True)
 
-                # 3. ★★★ 发送兜底成功通知 (新增逻辑) ★★★
+                # 3. 发送兜底成功通知 
                 if fallback_success_report:
                     admin_chat_ids = user_db.get_admin_telegram_chat_ids()
                     if admin_chat_ids:
@@ -677,52 +677,40 @@ def task_auto_subscribe(processor):
                         failed_notifications_to_send[user_id].append(f"《{item['title']}》(原因: 不满足发行日期延迟订阅)")
                 continue
 
-            # 2.2启用NULLBR + 优先级为NULLBR + 是老片
+            # 2.2启用NULLBR
             nullbr_handled = False
             
             if enable_nullbr_fallback and nullbr_priority == 'nullbr':
+                logger.info(f"  ➜ [策略] 检测到 NULLBR 优先模式，尝试直接搜索《{item['title']}》...")
                 
-                if item['item_type'] != 'Movie':
-                    logger.debug(f"  ➜ 《{item['title']}》是剧集，跳过 NULLBR 优先模式，交由 MP 处理。")
-                else:
-                    is_old_item = False
-                    release_date_value = item.get('release_date')
+                # 准备参数
+                tmdb_id = item['tmdb_id']
+                media_type = 'tv' if item['item_type'] in ['Series', 'Season'] else 'movie'
+                title = item['title']
+                season_number = item.get('season_number') # 如果是单季订阅，带上季号
 
-                    if not release_date_value:
-                        logger.warning(f"《{item['title']}》无发行日期，无法判定是否为老片")
-                        is_old_item = False
-                    else:
-                        try:
-                            days_since_release = (datetime.now().date() - release_date_value).days
-                            logger.debug(f"《{item['title']}》距离发行天数: {days_since_release}")
-                            is_old_item = days_since_release > movie_protection_days
-                        except Exception as e:
-                            logger.error(f"计算发行日期天数失败: {e}, 值: {release_date_value}")
-                            is_old_item = False
+                # 执行下载 (auto_download_best_resource 内部会自动处理季号)
+                if nullbr_handler.auto_download_best_resource(tmdb_id, media_type, title, season_number):
+                    logger.info(f"  ✅ 《{title}》NULLBR 直下成功，跳过 MP 订阅。")
                     
-                    if is_old_item:
-                        logger.info(f"  ➜ 检测到电影《{item['title']}》为老片且策略为 NULLBR 优先，尝试直接搜索资源...")
+                    # 1. 标记为 IGNORED (原因: NULLBR直下)
+                    request_db.set_media_status_ignored(
+                        tmdb_ids=[tmdb_id],
+                        item_type=item['item_type'],
+                        source={"type": "nullbr_priority", "reason": "downloaded_by_nullbr"},
+                        ignore_reason="NULLBR直下"
+                    )
                     
-                        # 执行下载
-                        if nullbr_handler.auto_download_best_resource(item['tmdb_id'], 'movie', item['title']):
-                            logger.info(f"  ✅ 《{item['title']}》NULLBR 直下成功，跳过 MP 订阅。")
-                            
-                            # 1. 标记为 IGNORED (原因: NULLBR直下)
-                            # 使用 IGNORED 而不是 SUBSCRIBED，是为了避免 MP 状态同步逻辑去检查它
-                            request_db.set_media_status_ignored(
-                                tmdb_ids=[item['tmdb_id']],
-                                item_type=item['item_type'],
-                                source={"type": "nullbr_priority", "reason": "downloaded_by_nullbr"},
-                                ignore_reason="NULLBR直下"
-                            )
-                            
-                            # 3. 记录通知
-                            subscription_details.append({'source': 'NULLBR优先', 'item': f"{item['title']} (直下)"})
-                            
-                            # 4. 标记已处理，跳过后续 MP 逻辑
-                            nullbr_handled = True
-                        else:
-                            logger.info(f"  ❌ NULLBR 未找到合适资源，回退到 MP 订阅流程。")
+                    # 2. 扣除配额 (虽然没走MP，但既然你目的是消耗NULLBR配额，这里扣不扣MP配额看你心情，通常还是扣一下表示“处理了一个请求”)
+                    settings_db.decrement_subscription_quota()
+
+                    # 3. 记录通知
+                    subscription_details.append({'source': 'NULLBR优先', 'item': f"{title} (直下)"})
+                    
+                    # 4. 标记已处理，跳过后续 MP 逻辑
+                    nullbr_handled = True
+                else:
+                    logger.info(f"  ❌ NULLBR 未找到合适资源，回退到 MP 订阅流程。")
 
             if nullbr_handled:
                 continue
