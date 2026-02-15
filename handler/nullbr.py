@@ -361,7 +361,10 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
         except: pass
     
     filters = config.get('filters', {})
-    if not any(filters.values()): return all_resources
+    # 如果 filters 全为空值，则不过滤
+    has_filter = any(filters.values())
+    if not has_filter:
+        return all_resources
         
     # 如果是剧集，获取该季的总集数，用于后续按单集平均大小过滤
     episode_count = 0
