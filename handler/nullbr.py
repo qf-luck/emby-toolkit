@@ -391,10 +391,21 @@ def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None):
 def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, season_number=None):
     config = get_config()
     
+    # 1. 确定要搜索的源
     if specific_source:
         sources_to_fetch = [specific_source]
     else:
-        sources_to_fetch = config.get('enabled_sources', ['115', 'magnet', 'ed2k'])
+        # 必须拷贝一份，防止修改原配置
+        sources_to_fetch = list(config.get('enabled_sources', ['115', 'magnet', 'ed2k']))
+    
+    # 2. 获取过滤配置 (提前获取)
+    filters = config.get('filters', {})
+    
+    # 如果开启了容器过滤，强制跳过磁力链 搜索以节省配额，因为磁力链的容器信息通常不可靠，且过滤后命中率较低
+    allowed_containers = filters.get('containers', [])
+    if allowed_containers and 'magnet' in sources_to_fetch:
+        logger.info(f"  ➜ [配置] 检测到开启了容器过滤 ({allowed_containers})，已自动跳过磁力链搜索以节省配额。")
+        sources_to_fetch.remove('magnet')
     
     # 配额检查
     if _user_level_cache.get('daily_quota', 0) > 0 and _user_level_cache.get('daily_used', 0) >= _user_level_cache.get('daily_quota', 0):
@@ -403,23 +414,24 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
 
     all_resources = []
     
-    # 1. 获取资源
-    if '115' in sources_to_fetch:
-        try: all_resources.extend(_fetch_single_source(tmdb_id, media_type, '115', season_number))
-        except: pass
-    if 'magnet' in sources_to_fetch:
-        try: all_resources.extend(_fetch_single_source(tmdb_id, media_type, 'magnet', season_number))
-        except: pass
-    if media_type == 'movie' and 'ed2k' in sources_to_fetch:
-        try: all_resources.extend(_fetch_single_source(tmdb_id, media_type, 'ed2k'))
-        except: pass
-    
-    # 2. 获取过滤配置
-    filters = config.get('filters', {})
-    if not any(filters.values()):
-        return all_resources
+    # 获取资源
+    for source in sources_to_fetch:
+        try:
+            # 针对 ed2k 的特殊判断 (TV 不搜 ed2k)
+            if media_type == 'tv' and source == 'ed2k':
+                continue
+                
+            res = _fetch_single_source(tmdb_id, media_type, source, season_number)
+            if res:
+                all_resources.extend(res)
+        except Exception as e:
+            logger.warning(f"  ➜ 获取 {source} 资源异常: {e}")
 
-    # ★★★ 3. 智能获取集数 (核心修复) ★★★
+    # 如果没有资源，直接返回
+    if not all_resources:
+        return []
+
+    # 智能获取集数 (仅在剧集且配置了大小过滤时尝试获取，以优化过滤效果)
     episode_count = 0
     should_fetch_ep_count = False
     
