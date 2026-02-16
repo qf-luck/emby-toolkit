@@ -273,7 +273,6 @@ def init_db():
                         name TEXT NOT NULL UNIQUE,
                         enabled BOOLEAN DEFAULT TRUE,
                         scope_rules JSONB DEFAULT '[]'::jsonb,
-                        delete_after_resubscribe BOOLEAN DEFAULT FALSE,
                         sort_order INTEGER DEFAULT 0,
                         resubscribe_resolution_enabled BOOLEAN DEFAULT FALSE,
                         resubscribe_resolution_threshold INT DEFAULT 1920,
@@ -292,7 +291,6 @@ def init_db():
                         resubscribe_codec_enabled BOOLEAN DEFAULT FALSE,
                         resubscribe_codec_include JSONB,
                         resubscribe_subtitle_skip_if_audio_exists BOOLEAN DEFAULT FALSE,
-                        auto_resubscribe BOOLEAN DEFAULT FALSE, 
                         custom_resubscribe_enabled BOOLEAN DEFAULT FALSE, 
                         consistency_check_enabled BOOLEAN DEFAULT FALSE,
                         consistency_must_match_resolution BOOLEAN DEFAULT FALSE,
@@ -305,7 +303,9 @@ def init_db():
                         delete_mode TEXT DEFAULT 'episode',          
                         delete_delay_seconds INTEGER DEFAULT 0,
                         filter_rating_ignore_zero BOOLEAN DEFAULT FALSE,
-                        filter_missing_episodes_enabled BOOLEAN DEFAULT FALSE
+                        filter_missing_episodes_enabled BOOLEAN DEFAULT FALSE,
+                        resubscribe_source TEXT DEFAULT 'moviepilot',
+                        resubscribe_entire_season BOOLEAN DEFAULT FALSE
                     )
                 """)
 
@@ -435,6 +435,8 @@ def init_db():
                         },
                         'resubscribe_rules': {
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",
+                            "resubscribe_source": "TEXT DEFAULT 'moviepilot'", 
+                            "resubscribe_entire_season": "BOOLEAN DEFAULT FALSE",
                         },
                         'collections_info': {
                             "poster_path": "TEXT",
@@ -561,7 +563,9 @@ def init_db():
                             'status'
                         ],
                         'resubscribe_rules': [
-                            'target_library_ids'
+                            'target_library_ids',
+                            'delete_after_resubscribe',
+                            'auto_resubscribe'
                         ],
                         'custom_collections': [
                             'missing_count'

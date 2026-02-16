@@ -27,7 +27,7 @@
         </n-tab-pane>
 
         <!-- Ed2k Tab -->
-        <n-tab-pane name="ed2k" tab="电驴(Ed2k)" :disabled="currentItemType === 'tv'">
+        <n-tab-pane name="ed2k" tab="电驴(Ed2k)">
             <div v-if="loadingSource === 'ed2k'" class="loading-box">
                 <n-spin size="medium" /><div class="loading-text">正在搜索 Ed2k...</div>
             </div>
@@ -145,10 +145,8 @@ const fetchResources = async (sourceType, autoCascade = false) => {
                 activeResourceTab.value = 'magnet';
                 await fetchResources('magnet', true);
             } else if (sourceType === 'magnet') {
-                if (currentItemType.value === 'movie') {
-                    activeResourceTab.value = 'ed2k';
-                    await fetchResources('ed2k', false);
-                }
+                activeResourceTab.value = 'ed2k';
+                await fetchResources('ed2k', false);
             }
         }
     } catch (error) {

@@ -629,7 +629,7 @@ def task_auto_subscribe(processor):
                 logger.debug("  ➜ 没有满足复活条件的项目。")
         
         # ======================================================================
-        # 阶段 3 - 执行常规订阅 
+        # 阶段 4 - 执行常规订阅 
         # ======================================================================
         logger.info("  ➜ 正在检查未上映...")
         promoted_count = media_db.promote_pending_to_wanted()
@@ -647,12 +647,11 @@ def task_auto_subscribe(processor):
         logger.info(f"  ➜ 发现 {len(wanted_items)} 个待处理的订阅请求。")
         task_manager.update_status_from_thread(10, f"发现 {len(wanted_items)} 个待处理请求...")
 
-        # 准备变量
         tmdb_api_key = config.get(constants.CONFIG_OPTION_TMDB_API_KEY)
-        subscription_details = [] # 给管理员的报告
-        rejected_details = []     # 给管理员的报告
-        notifications_to_send = {} # 给用户的通知 {user_id: [item_name, ...]}
-        failed_notifications_to_send = {} #失败的通知
+        subscription_details = []
+        rejected_details = []
+        notifications_to_send = {}
+        failed_notifications_to_send = {}
         quota_exhausted = False
 
         # 2. 遍历待办列表，逐一处理
@@ -677,177 +676,151 @@ def task_auto_subscribe(processor):
                         failed_notifications_to_send[user_id].append(f"《{item['title']}》(原因: 不满足发行日期延迟订阅)")
                 continue
 
-            # 2.2 启用NULLBR + 优先级为NULLBR
-            nullbr_handled = False
-            
+            # ★★★ 1. 准备基础信息 (提前获取剧集标题，用于日志和搜索) ★★★
+            tmdb_id = item['tmdb_id']
+            item_type = item['item_type']
+            title = item['title'] # 默认为 item 标题
+            season_number = item.get('season_number')
+            parent_tmdb_id = None
+
+            # 如果是季/集，修正标题为剧集标题
+            if item_type in ['Series', 'Season']:
+                if item_type == 'Season':
+                    parent_tmdb_id = item.get('parent_series_tmdb_id')
+                    # 尝试解析 ID
+                    if not parent_tmdb_id and '_' in str(tmdb_id):
+                        parent_tmdb_id = str(tmdb_id).split('_')[0]
+                    if not parent_tmdb_id:
+                        parent_tmdb_id = tmdb_id
+                else:
+                    parent_tmdb_id = tmdb_id
+
+                # 获取剧集名称
+                series_name = media_db.get_series_title_by_tmdb_id(parent_tmdb_id)
+                if not series_name:
+                     # 尝试从 item title 解析 (例如 "Breaking Bad - S1")
+                     raw_title = item.get('title', '')
+                     parsed_name, _ = parse_series_title_and_season(raw_title, tmdb_api_key)
+                     series_name = parsed_name if parsed_name else raw_title
+                
+                # ★★★ 关键：更新 title 变量为剧集标题，供后续 NULLBR 使用 ★★★
+                if series_name:
+                    title = series_name
+
+            # ★★★ 2. 决定是否使用 NULLBR (仅基于全局策略) ★★★
+            use_nullbr = False
             if enable_nullbr_fallback and nullbr_priority == 'nullbr':
-                
-                # --- ★★★ 新增：剧集完结检查逻辑 ★★★ ---
+                # 检查完结状态
                 proceed_with_nullbr = True
-                
-                if item['item_type'] in ['Series', 'Season']:
-                    # 获取正确的 TMDb ID (如果是季，优先取父剧集 ID)
-                    target_tmdb_id = int(item.get('parent_series_tmdb_id') or item['tmdb_id'])
-                    target_season = item.get('season_number')
-                    
-                    # 调用 helper 检查是否完结
-                    is_ended = check_series_completion(
-                        target_tmdb_id, 
-                        tmdb_api_key, 
-                        season_number=target_season, 
-                        series_name=item['title']
-                    )
-                    
+                if item_type in ['Series', 'Season']:
+                    target_tmdb_id = int(parent_tmdb_id or tmdb_id)
+                    is_ended = check_series_completion(target_tmdb_id, tmdb_api_key, season_number=season_number, series_name=title)
                     if not is_ended:
-                        logger.info(f"  ➜ 剧集《{item['title']}》尚未完结 (连载中)，跳过 NULLBR 搜索，交由 MP 进行追更订阅。")
+                        logger.info(f"  ➜ 剧集《{title}》尚未完结 (连载中)，跳过 NULLBR 搜索，交由 MP 进行追更订阅。")
                         proceed_with_nullbr = False
                 
-                # 只有 (是电影) 或 (是剧集且已完结) 才执行 NULLBR
                 if proceed_with_nullbr:
-                    logger.info(f"  ➜ [策略] 检测到 NULLBR 优先模式，尝试直接搜索《{item['title']}》...")
-                    
-                    # 准备参数
-                    tmdb_id = item['tmdb_id']
-                    media_type = 'tv' if item['item_type'] in ['Series', 'Season'] else 'movie'
-                    title = item['title']
-                    season_number = item.get('season_number')
+                    use_nullbr = True
 
-                    # 执行下载
-                    if nullbr_handler.auto_download_best_resource(tmdb_id, media_type, title, season_number):
-                        logger.info(f"  ✅ 《{title}》NULLBR 直下成功，跳过 MP 订阅。")
-                        
-                        request_db.set_media_status_ignored(
-                            tmdb_ids=[tmdb_id],
-                            item_type=item['item_type'],
-                            source={"type": "nullbr_priority", "reason": "downloaded_by_nullbr"},
-                            ignore_reason="NULLBR直下"
+            # ★★★ 3. 执行 NULLBR 逻辑 ★★★
+            nullbr_handled = False
+            if use_nullbr:
+                logger.info(f"  ➜ [策略] 使用 NULLBR 进行搜索《{title}》...")
+                
+                success = False
+                media_type_api = 'tv' if item_type in ['Series', 'Season'] else 'movie'
+                
+                if media_type_api == 'movie':
+                    success = nullbr_handler.auto_download_best_resource(tmdb_id, 'movie', title)
+                
+                elif media_type_api == 'tv':
+                    if parent_tmdb_id and season_number is not None:
+                        # 统一订阅只负责整季/整剧搜索，不处理复杂的缺集补全 (那是媒体整理的事)
+                        logger.info(f"  ➜ [NULLBR] 执行整季搜索: {title} S{season_number}")
+                        success = nullbr_handler.auto_download_best_resource(
+                            tmdb_id=parent_tmdb_id, media_type='tv', title=title, season_number=int(season_number)
                         )
-                        
-                        subscription_details.append({'source': 'NULLBR优先', 'item': f"{title} (直下)"})
-                        nullbr_handled = True
                     else:
-                        logger.info(f"  ❌ NULLBR 未找到合适资源，回退到 MP 订阅流程。")
+                        logger.warning(f"  ⚠️ 无法获取《{title}》的 SeriesID 或季号，跳过 NULLBR 搜索。")
+
+                if success:
+                    logger.info(f"  ✅ 《{title}》NULLBR 下载成功。")
+                    # 标记为 IGNORED (NULLBR直下)
+                    request_db.set_media_status_ignored(
+                        tmdb_ids=[tmdb_id],
+                        item_type=item_type,
+                        source={"type": "nullbr_priority", "reason": "downloaded_by_nullbr"},
+                        ignore_reason="NULLBR直下"
+                    )
+                    subscription_details.append({'source': 'NULLBR', 'item': f"{title} (直下)"})
+                    nullbr_handled = True
+                else:
+                    logger.info(f"  ❌ NULLBR 未找到合适资源，回退到 MP 订阅流程。")
 
             if nullbr_handled:
                 continue
 
-            # 2.3 检查配额
+            # 2.4 检查配额 (保持不变)
             if settings_db.get_subscription_quota() <= 0:
                 quota_exhausted = True
-                logger.warning("  ➜ 每日订阅配额已用尽，任务提前结束。")
                 break
 
-            # 2.4 执行订阅
+            # 2.5 执行 MP 订阅
             success = False
-            item_type = item['item_type']
-            series_name = ""
             mp_payload = {}
             
-            # ★★★ 检查是否包含洗版专用的 Payload ★★★
+            # 检查是否有自定义 Payload (仅保留 gap_scan 可能会用到，洗版逻辑已移除)
             sources = item.get('subscription_sources_json', [])
-            resub_source = next((s for s in sources if s.get('type') == 'resubscribe'), None)
-            custom_payload = resub_source.get('payload') if resub_source else None
-            
-            # 如果存在自定义 Payload，直接使用它 (这是最高优先级)
+            # 过滤掉 resubscribe 类型的 source (理论上不应该有了，但为了保险)
+            custom_payload = None
+            for s in sources:
+                if s.get('payload') and s.get('type') != 'resubscribe':
+                    custom_payload = s.get('payload')
+                    break
+
             if custom_payload:
-                logger.info(f"  ➜ 检测到《{item['title']}》包含自定义洗版 Payload，将执行精准洗版订阅。")
+                logger.info(f"  ➜ 检测到《{title}》包含自定义 Payload，执行精准订阅。")
                 success = moviepilot.subscribe_with_custom_payload(custom_payload, config)
-            
             else:
                 if item_type == 'Movie':
-                    mp_payload = {"name": item['title'], "tmdbid": int(item['tmdb_id']), "type": "电影"}
+                    mp_payload = {"name": title, "tmdbid": int(tmdb_id), "type": "电影"}
                     success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
 
                 elif item_type == 'Series':
-                    sources = item.get('subscription_sources_json', [])
-                    primary_source = sources[0] if sources else None
-                    should_force_resub = False
-                    for src in sources:
-                        stype = src.get('type')
-                        if stype == 'resubscribe':
-                            should_force_resub = True
-                            break
-
                     success = _subscribe_full_series_with_logic(
-                        tmdb_id=int(item['tmdb_id']),
-                        series_name=item['title'],
+                        tmdb_id=int(tmdb_id),
+                        series_name=title,
                         config=config,
                         tmdb_api_key=tmdb_api_key,
-                        source=primary_source 
+                        source=sources[0] if sources else None
                     )
                     if success:
-                        request_db.set_media_status_subscribed(
-                            tmdb_ids=[str(item['tmdb_id'])], 
-                            item_type='Series'
-                        )
+                        request_db.set_media_status_subscribed(tmdb_ids=[str(tmdb_id)], item_type='Series')
 
                 elif item_type == 'Season':
-                    parent_tmdb_id = item.get('parent_series_tmdb_id')
-                    season_num = item.get('season_number')
-                    
-                    series_name = media_db.get_series_title_by_tmdb_id(parent_tmdb_id)
-                    if not series_name:
-                         raw_title = item.get('title', '')
-                         parsed_name, _ = parse_series_title_and_season(raw_title, tmdb_api_key)
-                         series_name = parsed_name if parsed_name else raw_title
-
-                    if parent_tmdb_id and season_num is not None:
+                    if parent_tmdb_id and season_number is not None:
                         mp_payload = {
-                            "name": series_name,
+                            "name": title, # 使用修正后的剧集标题
                             "tmdbid": int(parent_tmdb_id),
                             "type": "电视剧",
-                            "season": season_num
+                            "season": season_number
                         }
                         
-                        # 1. 检查具体的来源类型
-                        is_explicit_resub = any(source.get('type') == 'resubscribe' for source in sources)
-                        is_gap_scan = any(source.get('type') == 'gap_scan' for source in sources)
-                        
-                        # --- 预先检查是否满足自动待定条件 ---
+                        # 待定逻辑 (保持不变)
                         is_pending_logic = False
                         fake_total_episodes = 0
-                        # 只有非洗版、非缺集扫描的普通订阅才检查待定逻辑
-                        if not is_explicit_resub and not is_gap_scan:
-                            is_pending_logic, fake_total_episodes = should_mark_as_pending(
-                                int(parent_tmdb_id), season_num, tmdb_api_key
-                            )
-                            if is_pending_logic:
-                                logger.info(f"  ⏳ 季《{series_name}》S{season_num} 满足自动待定条件，将执行 [订阅 -> 转待定] 流程。")
 
-                        # 2. 应用订阅策略
-                        if is_explicit_resub:
-                            # 情况 A: 明确的洗版规则触发 -> 强制 best_version=1
+                        is_pending_logic, fake_total_episodes = should_mark_as_pending(int(parent_tmdb_id), season_number, tmdb_api_key)
+
+                        if is_pending_logic:
+                            pass
+                        elif check_series_completion(int(parent_tmdb_id), tmdb_api_key, season_number=season_number, series_name=title):
                             mp_payload["best_version"] = 1
-                            logger.info(f"  ➜ 触发自动洗版规则，为《{series_name}》S{season_num} 启用洗版模式。")
-                            
-                        elif "best_version" not in mp_payload:
-                            # 情况 C: 普通订阅
-                            
-                            # --- 如果是待定逻辑，则不检查完结，保持 best_version=0 ---
-                            if is_pending_logic:
-                                logger.info(f"  ➜ S{season_num} 处于待定模式，使用追更模式订阅。")
-                            # 否则才检查是否完结
-                            elif check_series_completion(int(parent_tmdb_id), tmdb_api_key, season_number=season_num, series_name=series_name):
-                                mp_payload["best_version"] = 1
-                                logger.info(f"  ➜ S{season_num} 已完结，启用洗版模式。")
                         
                         success = moviepilot.subscribe_with_custom_payload(mp_payload, config)
 
-                        # --- [新增] 订阅成功后的后置处理：修改状态为待定 ---
                         if success and is_pending_logic:
-                            logger.info(f"  ➜ [后置操作] 正在将 S{season_num} 的状态修改为 'P' (待定)，并将总集数修正为 {fake_total_episodes}...")
-                            mp_update_success = moviepilot.update_subscription_status(
-                                tmdb_id=int(parent_tmdb_id),
-                                season=season_num,
-                                status='P', 
-                                config=config,
-                                total_episodes=fake_total_episodes
-                            )
-                            if mp_update_success:
-                                logger.info(f"  ✅ S{season_num} 已成功转为待定状态。")
-                            else:
-                                logger.warning(f"  ⚠️ S{season_num} 订阅成功，但转待定状态失败。")
-
+                             moviepilot.update_subscription_status(int(parent_tmdb_id), season_num, 'P', config, total_episodes=fake_total_episodes)
                     else:
                         success = False
 

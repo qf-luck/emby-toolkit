@@ -189,6 +189,16 @@
                             <template #trigger><n-text :depth="3" class="info-text ellipsis full-width-item">字幕: {{ item.subtitle_display }}</n-text></template>
                             {{ item.subtitle_display }}
                         </n-tooltip>
+                        <!-- 缺集展示 -->
+                        <n-tooltip v-if="item.missing_episodes && item.missing_episodes.length > 0" trigger="hover" placement="top-start">
+                            <template #trigger>
+                                <n-text class="info-text full-width-item" style="color: var(--n-error-color);">
+                                    <n-icon :component="AlertCircleOutline" style="vertical-align: -2px; margin-right: 2px;" />
+                                    缺失: {{ item.missing_episodes.length }} 集
+                                </n-text>
+                            </template>
+                            缺失集号: {{ item.missing_episodes.join(', ') }}
+                        </n-tooltip>
                       </div>
                     </n-space>
                   </div>

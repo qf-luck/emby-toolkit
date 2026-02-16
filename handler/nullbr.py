@@ -311,19 +311,27 @@ def search_media(keyword, page=1):
         logger.error(f"  ➜ NULLBR 搜索失败: {e}")
         raise e
 
-def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None):
+def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None, episode_number=None):
     _wait_for_rate_limit() # 自动流控
     
     url = ""
     if media_type == 'movie':
         url = f"{NULLBR_API_BASE}/movie/{tmdb_id}/{source_type}"
     elif media_type == 'tv':
-        if season_number:
-            url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/season/{season_number}/{source_type}"
+        # ★★★ 核心修改：支持单集 URL 拼接 ★★★
+        if season_number is not None:
+            if episode_number is not None:
+                # 接口: /tv/{id}/season/{s}/episode/{e}/{source}
+                url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/season/{season_number}/episode/{episode_number}/{source_type}"
+            else:
+                # 接口: /tv/{id}/season/{s}/{source}
+                url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/season/{season_number}/{source_type}"
         else:
+            # 整剧搜索 (通常只有 115 支持，或者 magnet 搜第一季)
             if source_type == '115':
                 url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/115"
             elif source_type == 'magnet':
+                # 如果没传季号，默认搜第1季磁力，或者你可以选择不搜
                 url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/season/1/magnet"
             else:
                 return []
@@ -364,7 +372,7 @@ def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None):
                     zh_keywords = ['中字', '中英', '字幕', 'CHS', 'CHT', 'CN', 'DIY', '国语', '国粤']
                     if any(k in t_upper for k in zh_keywords): is_zh = True
                 
-                # 季号清洗逻辑 (保持不变)
+                # 季号清洗逻辑
                 if media_type == 'tv' and season_number:
                     try:
                         target_season = int(season_number)
@@ -388,7 +396,7 @@ def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None):
         logger.warning(f"  ➜ 获取 {source_type} 资源失败: {e}")
         return []
 
-def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, season_number=None):
+def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, season_number=None, episode_number=None):
     config = get_config()
     
     # 1. 确定要搜索的源
@@ -419,9 +427,10 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
         try:
             # 针对 ed2k 的特殊判断 (TV 不搜 ed2k)
             if media_type == 'tv' and source == 'ed2k':
-                continue
+                if episode_number is None:
+                    continue
                 
-            res = _fetch_single_source(tmdb_id, media_type, source, season_number)
+            res = _fetch_single_source(tmdb_id, media_type, source, season_number, episode_number)
             if res:
                 all_resources.extend(res)
         except Exception as e:
@@ -731,7 +740,7 @@ def handle_push_request(link, title):
     
     return True
 
-def auto_download_best_resource(tmdb_id, media_type, title, season_number=None):
+def auto_download_best_resource(tmdb_id, media_type, title, season_number=None, episode_number=None):
     """
     [自动任务专用] 搜索并下载最佳资源
     :param season_number: 季号 (仅 media_type='tv' 时有效)
@@ -756,7 +765,7 @@ def auto_download_best_resource(tmdb_id, media_type, title, season_number=None):
             if source not in user_enabled: continue
             if media_type == 'tv' and source == 'ed2k': continue
 
-            resources = fetch_resource_list(tmdb_id, media_type, specific_source=source, season_number=season_number)
+            resources = fetch_resource_list(tmdb_id, media_type, specific_source=source, season_number=season_number, episode_number=episode_number)
             
             if not resources:
                 continue

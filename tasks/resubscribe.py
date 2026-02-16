@@ -13,6 +13,7 @@ from collections import defaultdict
 import task_manager
 import handler.emby as emby
 import handler.moviepilot as moviepilot
+import handler.nullbr as nullbr_handler
 import constants  
 from database import resubscribe_db, settings_db, maintenance_db, request_db, queries_db, media_db
 
@@ -109,7 +110,7 @@ def task_update_resubscribe_cache(processor):
         # --- 步骤 1: 加载规则 ---
         task_manager.update_status_from_thread(0, "正在加载规则...")
         time.sleep(0.5) 
-        
+        missing_info_updates = {}
         # 获取所有启用的规则，按 sort_order 排序 (优先级高的在前)
         all_enabled_rules = [rule for rule in resubscribe_db.get_all_resubscribe_rules() if rule.get('enabled')]
         
@@ -254,22 +255,7 @@ def task_update_resubscribe_cache(processor):
                     final_status = 'ignored'
                 else:
                     logger.info(f"  ➜ 《{movie['title']}》命中规则 '{rule_name}'。原因: {reason}")
-                    if rule.get('auto_resubscribe'):
-                        final_status = 'auto_subscribed'
-                        if existing_status != 'auto_subscribed':
-                            _handle_auto_resubscribe_trigger(
-                                item_details={
-                                    'tmdb_id': tmdb_id,
-                                    'item_type': 'Movie',
-                                    'item_name': movie['title'],
-                                    'season_number': None,
-                                    'release_group_raw': assets[0].get('release_group_raw', [])
-                                },
-                                rule=rule,
-                                reason=reason
-                            )
-                    else:
-                        final_status = 'needed'
+                    final_status = 'needed'
 
                 keys_to_keep_in_db.add(item_key_tuple[0])
                 index_update_batch.append({
@@ -314,13 +300,21 @@ def task_update_resubscribe_cache(processor):
                         if season_num is None: continue
                         if int(season_num) == 0: continue
 
-                        # 缺集计算
+                        # --- 1. 计算缺集 (逻辑保持不变) ---
+                        missing_episodes = []
                         has_gaps = False
-                        valid_eps = [e for e in eps_in_season if e.get('episode_number') and e.get('asset_details_json')]
+                        
+                        valid_eps = [e for e in eps_in_season if e.get('episode_number')]
                         if valid_eps:
-                            max_ep = max(e['episode_number'] for e in valid_eps)
-                            count_ep = len(valid_eps)
-                            if max_ep > count_ep: has_gaps = True
+                            existing_ep_nums = set(e['episode_number'] for e in valid_eps)
+                            max_ep = max(existing_ep_nums)
+                            for i in range(1, max_ep):
+                                if i not in existing_ep_nums:
+                                    missing_episodes.append(i)
+                            
+                            if missing_episodes:
+                                has_gaps = True
+                                missing_episodes.sort()
 
                         # 跳过多版本
                         has_multi_version = False
@@ -337,11 +331,15 @@ def task_update_resubscribe_cache(processor):
                         assets = rep_ep.get('asset_details_json')
                         if not assets: continue
 
+                        if season_tmdb_id:
+                            missing_info_updates[season_tmdb_id] = missing_episodes
+
                         current_season_wrapper = series_meta_wrapper.copy()
                         current_season_wrapper.update({
                             'item_type': 'Season',
                             'season_number': int(season_num),
-                            'has_gaps': has_gaps
+                            'has_gaps': has_gaps,
+                            'missing_episodes': missing_episodes
                         })
 
                         # --- 初始化计算状态 ---
@@ -385,7 +383,25 @@ def task_update_resubscribe_cache(processor):
                         item_key_tuple = (tmdb_id, "Season", int(season_num))
                         existing_status = current_statuses.get(item_key_tuple)
                         
-                        if status_calculated == 'ok': continue
+                        # 4. 缺集检查
+                        if status_calculated == 'ok' and rule.get("filter_missing_episodes_enabled"):
+                            if has_gaps:
+                                status_calculated = 'needed'
+                                # ★★★ 确保原因被赋值 ★★★
+                                reason_calculated = f"缺失集数: {','.join(map(str, missing_episodes[:5]))}{'...' if len(missing_episodes)>5 else ''}"
+                            else:
+                                # 如果规则只开启了“缺集筛选”，而当前季不缺集，
+                                # 且没有命中上面的评分/画质规则，那么它就是 ok 的，不应该被加入 index_update_batch
+                                pass
+
+                        # ★★★ 修复 3: 只有 status_calculated != 'ok' 才入库 ★★★
+                        # 如果状态是 ok，说明它不符合任何洗版/删除条件，直接跳过
+                        if status_calculated == 'ok': 
+                            continue
+
+                        # ... (后续入库逻辑) ...
+                        item_key_tuple = (tmdb_id, "Season", int(season_num))
+                        existing_status = current_statuses.get(item_key_tuple)
 
                         final_status = 'needed'
                         if existing_status in ['subscribed', 'auto_subscribed']:
@@ -394,23 +410,7 @@ def task_update_resubscribe_cache(processor):
                             final_status = 'ignored'
                         else:
                             logger.info(f"  ➜ 《{series['title']} - 第{season_num}季》命中规则 '{rule_name}'。原因: {reason_calculated}")
-                            if rule.get('auto_resubscribe'):
-                                final_status = 'auto_subscribed'
-                                if existing_status != 'auto_subscribed':
-                                    _handle_auto_resubscribe_trigger(
-                                        item_details={
-                                            'tmdb_id': tmdb_id,
-                                            'season_tmdb_id': season_tmdb_id,
-                                            'item_type': 'Season',
-                                            'item_name': f"{series['title']} - 第{season_num}季",
-                                            'season_number': season_num,
-                                            'release_group_raw': assets[0].get('release_group_raw', [])
-                                        },
-                                        rule=rule,
-                                        reason=reason_calculated
-                                    )
-                            else:
-                                final_status = 'needed'
+                            final_status = 'needed'
 
                         keys_to_keep_in_db.add(f"{tmdb_id}-S{season_num}")
                         index_update_batch.append({
@@ -420,6 +420,11 @@ def task_update_resubscribe_cache(processor):
 
         # --- 步骤 4: 执行数据库更新与清理 ---
         
+        # 4.0 ★★★ 更新缺集信息到 media_metadata ★★★
+        if missing_info_updates:
+            task_manager.update_status_from_thread(90, f"正在更新 {len(missing_info_updates)} 条缺集记录...")
+            resubscribe_db.batch_update_missing_info(missing_info_updates)
+
         # 4.1 更新有效记录
         if index_update_batch:
             task_manager.update_status_from_thread(95, f"正在保存 {len(index_update_batch)} 条结果...")
@@ -460,65 +465,6 @@ def task_resubscribe_batch(processor, item_ids: List[str]):
 # ======================================================================
 # 内部辅助函数
 # ======================================================================
-# 辅助函数：处理自动洗版触发 
-def _handle_auto_resubscribe_trigger(item_details: dict, rule: dict, reason: str):
-    """
-    当发现项目需要洗版且规则开启了自动洗版时，将其推送到统一订阅队列 (WANTED)。
-    """
-    try:
-        tmdb_id = str(item_details['tmdb_id']) # Series ID
-        item_type = item_details['item_type']
-        season_number = item_details.get('season_number')
-        season_tmdb_id = item_details.get('season_tmdb_id') # <--- 获取传入的季 ID
-
-        # ★★★ 核心修复：确定存储 ID ★★★
-        storage_tmdb_id = tmdb_id
-        
-        if item_type == 'Season' and season_number is not None:
-            if season_tmdb_id:
-                # 优先使用数据库中已存在的原生季 ID
-                storage_tmdb_id = str(season_tmdb_id)
-            else:
-                # 兜底：如果数据库里没有季的条目（极少见），使用复合 ID
-                storage_tmdb_id = f"{tmdb_id}_S{season_number}"
-                logger.warning(f"  ⚠ 剧集 {tmdb_id} 第 {season_number} 季未关联到原生ID，使用复合ID: {storage_tmdb_id}")
-
-        # 1. 构建 Source 对象
-        source = {
-            "type": "resubscribe",
-            "rule_id": rule.get('id'),
-            "rule_name": rule.get('name'),
-            "reason": reason,
-            "created_at": time.time()
-        }
-
-        # 2. 如果开启了自定义洗版，生成 Payload
-        if rule.get('custom_resubscribe_enabled'):
-            payload = build_resubscribe_payload(item_details, rule)
-            if payload:
-                source['payload'] = payload
-        
-        # 3. 清理旧来源
-        request_db.remove_sources_by_type(storage_tmdb_id, item_type, 'resubscribe')
-
-        # 4. 推送到 media_metadata 表
-        request_db.set_media_status_wanted(
-            tmdb_ids=storage_tmdb_id, 
-            item_type=item_type,
-            source=source,
-            media_info_list=[{
-                'tmdb_id': storage_tmdb_id, 
-                'title': item_details['item_name'],
-                'season_number': season_number,
-                'parent_series_tmdb_id': tmdb_id if item_type == 'Season' else None,
-                'reason': reason
-            }]
-        )
-        logger.info(f"  ➜ [自动洗版] 已更新《{item_details['item_name']}》的洗版请求 (WANTED)。")
-
-    except Exception as e:
-        logger.error(f"  ➜ [自动洗版] 触发失败: {e}", exc_info=True)
-
 def _item_needs_resubscribe(asset_details: dict, rule: dict, media_metadata: Optional[dict]) -> tuple[bool, str]:
     """
     完全依赖 asset_details 中预先分析好的数据进行判断，不再进行任何二次解析。
@@ -1144,59 +1090,130 @@ def _execute_resubscribe(processor, task_name: str, target):
             continue # 删除模式结束，跳过后续逻辑
         
         # --- 分支 2: 洗版模式 ---
+        # 获取配置
+        sub_source = rule.get('resubscribe_source', 'moviepilot')
+        is_entire_season = rule.get('resubscribe_entire_season', False)
         
-        # =======================================================
-        # [修改] 修复开关逻辑：检查“自定义洗版”开关
-        # =======================================================
-        # 如果开启了“自定义洗版”，则传入 rule，生成包含分辨率、特效、字幕等限制的 Payload
-        # 如果关闭了“自定义洗版”，则传入 None，只生成基础 Payload (仅含 ID 和 Name，由 MP 自动决定版本)
-        rule_for_payload = rule if rule.get('custom_resubscribe_enabled') else None
+        # 获取缺集信息 (从数据库或 item 中获取，这里假设 item 已经包含了从 media_metadata 联查出来的 missing_info)
+        # 注意：get_resubscribe_library_status 需要修改 SQL 才能带出 missing_info，
+        # 或者我们在这里简单处理：如果是缺集原因，我们假设是部分洗版
         
-        payload = build_resubscribe_payload(item, rule_for_payload)
-        if not payload: continue
+        # 为了简单起见，我们重新查一下该季的缺集信息 (如果需要精准补集)
+        missing_episodes = []
+        if item_type == 'Season' and not is_entire_season:
+            # 这里可以调用一个轻量级 DB 查询获取 missing_episodes
+            # 暂且假设如果是 "缺失集数" 原因，则尝试去 media_metadata 拿
+            pass # 实际实现建议在 get_resubscribe_library_status SQL 中 join 出来
+
         # =======================================================
+        # 场景 A: MoviePilot 订阅
+        # =======================================================
+        if sub_source == 'moviepilot':
+            rule_for_payload = rule if rule.get('custom_resubscribe_enabled') else None
+            payload = build_resubscribe_payload(item, rule_for_payload)
+            if not payload: continue
 
-        # ======================================================================
-        # ★★★ 先尝试取消旧订阅，确保洗版参数生效 ★★★
-        # ======================================================================
-        try:
-            logger.info(f"  ➜ 正在检查并清理《{item_name}》的旧订阅...")
-            
-            # 调用 moviepilot.cancel_subscription
-            # 即使订阅不存在，该函数也会返回 True，所以直接调用即可
-            if moviepilot.cancel_subscription(str(tmdb_id), item_type, config, season=season_number):
-                logger.info(f"  ➜ 旧订阅清理指令已发送，等待 2 秒以确保 MoviePilot 数据库同步...")
-                time.sleep(2) # <--- 增加延时，防止竞态条件
-            else:
-                logger.warning(f"  ➜ 旧订阅清理失败（可能是网络问题），尝试强行提交新订阅...")
-                
-        except Exception as e:
-            logger.error(f"  ➜ 清理旧订阅时发生错误: {e}，继续尝试提交...")
-        # ======================================================================
-
-        # 提交新订阅
-        if moviepilot.subscribe_with_custom_payload(payload, config):
-            settings_db.decrement_subscription_quota()
-            resubscribed_count += 1
-            
-            # 处理“洗版后删除”逻辑
-            if rule and rule.get('delete_after_resubscribe'):
-                id_to_delete = item.get('emby_item_id') or item_id
-                if emby.delete_item(id_to_delete, processor.emby_url, processor.emby_api_key, processor.emby_user_id):
-                    try:
-                        logger.info(f"  ➜ 源文件删除成功，开始为 Emby ID {id_to_delete} (Name: {item_name}) 执行数据库善后清理...")
-                        maintenance_db.cleanup_deleted_media_item(
-                            item_id=id_to_delete,
-                            item_name=item_name,
-                            item_type=item_type
-                        )
-                        logger.info(f"  ➜ Emby ID {id_to_delete} 的善后清理已完成。")
-                    except Exception as cleanup_e:
-                        logger.error(f"  ➜ 执行善后清理 media item {id_to_delete} 时发生错误: {cleanup_e}", exc_info=True)
-                    deleted_count += 1
+            # ★★★ 核心逻辑：缺集洗版整季开关 ★★★
+            if item_type == 'Season':
+                if is_entire_season:
+                    # 开启：强制洗版整季 -> 加上 best_version
+                    payload['best_version'] = 1
+                    logger.info(f"  ➜ [MP] 规则开启了整季洗版，添加 best_version=1")
                 else:
-                    resubscribe_db.update_resubscribe_item_status(item_id, 'subscribed')
+                    # 关闭：只补缺集 -> 移除 best_version (MP 默认行为是补齐)
+                    if 'best_version' in payload:
+                        del payload['best_version']
+                    logger.info(f"  ➜ [MP] 规则关闭了整季洗版，移除 best_version (仅补缺)")
+
+            # ======================================================================
+            # ★★★ 先尝试取消旧订阅，确保洗版参数生效 ★★★
+            # ======================================================================
+            try:
+                logger.info(f"  ➜ 正在检查并清理《{item_name}》的旧订阅...")
+                
+                # 调用 moviepilot.cancel_subscription
+                # 即使订阅不存在，该函数也会返回 True，所以直接调用即可
+                if moviepilot.cancel_subscription(str(tmdb_id), item_type, config, season=season_number):
+                    logger.info(f"  ➜ 旧订阅清理指令已发送，等待 2 秒以确保 MoviePilot 数据库同步...")
+                    time.sleep(2) # <--- 增加延时，防止竞态条件
+                else:
+                    logger.warning(f"  ➜ 旧订阅清理失败（可能是网络问题），尝试强行提交新订阅...")
+                    
+            except Exception as e:
+                logger.error(f"  ➜ 清理旧订阅时发生错误: {e}，继续尝试提交...")
+            # ======================================================================
+
+            # 提交新订阅
+            if moviepilot.subscribe_with_custom_payload(payload, config):
+                settings_db.decrement_subscription_quota()
+                resubscribed_count += 1
+                
+                logger.info(f"  ➜ 成功提交订阅到 MoviePilot: {item_name}")
             else:
+                logger.error(f"  ➜ 提交订阅到 MoviePilot 失败: {item_name}")                
+                if i < total - 1: time.sleep(delay)
+
+        # =======================================================
+        # 场景 B: NULLBR 订阅
+        # =======================================================
+        elif sub_source == 'nullbr':
+            logger.info(f"  ➜ [NULLBR] 使用 NULLBR 源进行洗版/补货...")
+            
+            success = False
+            
+            if item_type == 'Movie':
+                # 电影直接搜
+                success = nullbr_handler.auto_download_best_resource(
+                    tmdb_id=tmdb_id, media_type='movie', title=item_name
+                )
+            
+            elif item_type == 'Season':
+                season_num = item.get('season_number')
+                
+                # ★★★ 核心逻辑修复：直接从 item 获取缺集信息 ★★★
+                missing_eps = item.get('missing_episodes', [])
+
+                if is_entire_season:
+                    # 模式 1: 强制整季搜索 (不传 episode_number)
+                    logger.info(f"  ➜ [NULLBR] 规则设定为整季洗版: S{season_num}")
+                    success = nullbr_handler.auto_download_best_resource(
+                        tmdb_id=tmdb_id, media_type='tv', title=item_name, season_number=season_num
+                    )
+                elif missing_eps:
+                    # 模式 2: 精准补集 (有缺集数据)
+                    logger.info(f"  ➜ [NULLBR] 执行精准补集: {missing_eps}")
+                    any_success = False
+                    
+                    for ep_num in missing_eps:
+                        if processor.is_stop_requested(): break
+                        
+                        ep_title = f"{item_name} E{ep_num}"
+                        # 调用 NULLBR 单集搜索
+                        if nullbr_handler.auto_download_best_resource(
+                            tmdb_id=tmdb_id, 
+                            media_type='tv', 
+                            title=ep_title, 
+                            season_number=season_num, 
+                            episode_number=ep_num # 传递集号
+                        ):
+                            any_success = True
+                            logger.info(f"    ✅ 第 {ep_num} 集推送成功")
+                            time.sleep(1.5) # 避免请求过快
+                        else:
+                            logger.warning(f"    ❌ 第 {ep_num} 集未找到资源")
+                            
+                    success = any_success
+                else:
+                    # 模式 3: 既没开启整季，也没缺集数据 (可能是画质洗版而非缺集洗版)
+                    # 这种情况下，默认回退到整季搜索
+                    logger.info(f"  ➜ [NULLBR] 无缺集信息，执行整季洗版: S{season_num}")
+                    success = nullbr_handler.auto_download_best_resource(
+                        tmdb_id=tmdb_id, media_type='tv', title=item_name, season_number=season_num
+                    )
+
+            if success:
+                settings_db.decrement_subscription_quota()
+                resubscribed_count += 1
                 resubscribe_db.update_resubscribe_item_status(item_id, 'subscribed')
             
             if i < total - 1: time.sleep(delay)

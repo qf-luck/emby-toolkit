@@ -98,7 +98,8 @@ def get_resources():
             data.get('tmdb_id') or data.get('id'), 
             data.get('media_type', 'movie'), 
             specific_source=data.get('source_type'), 
-            season_number=data.get('season_number')
+            season_number=data.get('season_number'),
+            episode_number=data.get('episode_number')
         )
         return jsonify({"status": "success", "data": resource_list, "total": len(resource_list)})
     except Exception as e:
