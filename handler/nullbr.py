@@ -140,10 +140,30 @@ def _is_resource_valid(item, filters, media_type='movie', episode_count=0):
         title = item.get('title', '').lower()
         link = item.get('link', '').lower()
         ext = None
-        if 'mkv' in title or link.endswith('.mkv'): ext = 'mkv'
-        elif 'mp4' in title or link.endswith('.mp4'): ext = 'mp4'
-        elif 'iso' in title or link.endswith('.iso'): ext = 'iso'
-        elif 'ts' in title or link.endswith('.ts'): ext = 'ts'
+
+        if link.startswith('ed2k://'):
+            # Ed2k 格式: ed2k://|file|文件名|大小|哈希|/
+            # 使用 | 分割，文件名通常在第 3 部分 (索引 2)
+            try:
+                parts = link.split('|')
+                if len(parts) >= 3:
+                    file_name_in_link = parts[2].lower()
+                    if file_name_in_link.endswith('.mkv'): ext = 'mkv'
+                    elif file_name_in_link.endswith('.mp4'): ext = 'mp4'
+                    elif file_name_in_link.endswith('.iso'): ext = 'iso'
+                    elif file_name_in_link.endswith('.ts'): ext = 'ts'
+                    elif file_name_in_link.endswith('.avi'): ext = 'avi'
+            except:
+                pass # 解析失败则忽略，回退到下方逻辑
+
+        # 如果上面没提取到 (比如是磁力链或 115 码)，则走原有逻辑
+        if not ext:
+            if 'mkv' in title or link.endswith('.mkv'): ext = 'mkv'
+            elif 'mp4' in title or link.endswith('.mp4'): ext = 'mp4'
+            elif 'iso' in title or link.endswith('.iso'): ext = 'iso'
+            elif 'ts' in title or link.endswith('.ts'): ext = 'ts'
+            elif 'avi' in title or link.endswith('.avi'): ext = 'avi'
+            
         if not ext or ext not in allowed_containers: 
             logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为容器 {ext} 不在允许列表中")
             return False
