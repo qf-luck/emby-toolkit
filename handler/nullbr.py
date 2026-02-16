@@ -418,9 +418,9 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
                 season_info = tmdb.get_tv_season_details(tmdb_id, season_number, tmdb_api_key)
                 if season_info and 'episodes' in season_info:
                     episode_count = len(season_info['episodes'])
-                    logger.info(f"  ➜ [过滤优化] 获取到 S{season_number} 总集数: {episode_count}，将按单集平均大小过滤。")
+                    logger.info(f"  ➜ [NULLBR] 获取到 （第 {season_number} 季） 总集数: {episode_count}，将按单集平均大小过滤。")
                 else:
-                    logger.warning(f"  ⚠️ TMDb 未返回 S{season_number} 的分集信息，将回退到按总大小过滤。")
+                    logger.warning(f"  ⚠️ TMDb 未返回 （第 {season_number} 季） 的分集信息，将回退到按总大小过滤。")
         except Exception as e:
             logger.warning(f"  ⚠️ 获取 TMDb 季集数失败: {e}")
 
