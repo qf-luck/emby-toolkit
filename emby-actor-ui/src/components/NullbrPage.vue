@@ -206,6 +206,7 @@
                         <n-space>
                           <n-checkbox value="mkv" label="MKV" />
                           <n-checkbox value="mp4" label="MP4" />
+                          <n-checkbox value="ts" label="TS" />
                           <n-checkbox value="iso" label="ISO" />
                         </n-space>
                       </n-checkbox-group>
