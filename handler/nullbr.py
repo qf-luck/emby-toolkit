@@ -69,6 +69,7 @@ def _is_resource_valid(item, filters, media_type='movie', episode_count=0):
     if allowed_resolutions:
         res = item.get('resolution')
         if not res or res not in allowed_resolutions:
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为分辨率 {res} 不在允许列表中")
             return False
 
     # 2. 质量过滤
@@ -77,7 +78,9 @@ def _is_resource_valid(item, filters, media_type='movie', episode_count=0):
         item_quality = item.get('quality')
         if not item_quality: return False
         q_list = [item_quality] if isinstance(item_quality, str) else item_quality
-        if not any(q in q_list for q in allowed_qualities): return False
+        if not any(q in q_list for q in allowed_qualities): 
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为质量 {item_quality} 不在允许列表中")
+            return False
 
     # 3. 大小过滤 (GB) 
     min_size = 0.0
@@ -125,7 +128,10 @@ def _is_resource_valid(item, filters, media_type='movie', episode_count=0):
         if item.get('is_zh_sub'): return True
         title = item.get('title', '').upper()
         zh_keywords = ['中字', '中英', '字幕', 'CHS', 'CHT', 'CN', 'DIY', '国语', '国粤']
-        if not any(k in title for k in zh_keywords): return False
+        if not any(k in title for k in zh_keywords): 
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为未检测到中文字幕")
+            return False
+            
 
     # 5. 容器过滤
     allowed_containers = filters.get('containers', [])
