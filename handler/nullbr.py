@@ -409,7 +409,7 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
     # 2. 获取过滤配置 (提前获取)
     filters = config.get('filters', {})
     
-    # 如果开启了容器过滤，强制跳过磁力链 搜索以节省配额，因为磁力链的容器信息通常不可靠，且过滤后命中率较低
+    # 如果开启了容器过滤，强制跳过磁力链 搜索以节省配额
     allowed_containers = filters.get('containers', [])
     if allowed_containers and 'magnet' in sources_to_fetch:
         logger.debug(f"  ➜ [NULLBR] 检测到开启了容器过滤 ({allowed_containers})，已跳过磁力链搜索以节省配额。")
@@ -420,33 +420,15 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
         logger.warning(f"  ⚠️ 今日配额已用完，无法请求API搜索资源。")
         raise Exception("今日 API 配额已用完，请明日再试或升级套餐。")
 
-    all_resources = []
-    
-    # 获取资源
-    for source in sources_to_fetch:
-        try:
-            # 针对 ed2k 的特殊判断 (TV 不搜 ed2k)
-            if media_type == 'tv' and source == 'ed2k':
-                if episode_number is None:
-                    continue
-                
-            res = _fetch_single_source(tmdb_id, media_type, source, season_number, episode_number)
-            if res:
-                all_resources.extend(res)
-        except Exception as e:
-            logger.warning(f"  ➜ 获取 {source} 资源异常: {e}")
-
-    # 如果没有资源，直接返回
-    if not all_resources:
-        return []
-
-    # 智能获取集数 (仅在剧集且配置了大小过滤时尝试获取，以优化过滤效果)
+    # ==============================================================================
+    # ★★★ 提前计算集数 (用于大小过滤) ★★★
+    # ==============================================================================
     episode_count = 0
     should_fetch_ep_count = False
     
     # 只有是剧集且有季号时才考虑
     if media_type == 'tv' and season_number is not None:
-        # 检查是否配置了大小限制 (只要配置了 min 或 max 且大于0)
+        # 检查是否配置了大小限制
         t_min = filters.get('tv_min_size')
         if t_min is None: t_min = filters.get('min_size')
         
@@ -457,30 +439,62 @@ def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, seaso
             if (t_min and float(t_min) > 0) or (t_max and float(t_max) > 0):
                 should_fetch_ep_count = True
         except:
-            pass # 转换失败忽略
+            pass 
 
     if should_fetch_ep_count:
         try:
             tmdb_api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
             if tmdb_api_key:
-                # 调用 TMDb 接口
                 season_info = tmdb.get_tv_season_details(tmdb_id, season_number, tmdb_api_key)
                 if season_info and 'episodes' in season_info:
                     episode_count = len(season_info['episodes'])
                     logger.info(f"  ➜ [NULLBR] 获取到 （第 {season_number} 季） 总集数: {episode_count}，将按单集平均大小过滤。")
-                else:
-                    logger.warning(f"  ⚠️ TMDb 未返回 （第 {season_number} 季） 的分集信息，将回退到按总大小过滤。")
         except Exception as e:
             logger.warning(f"  ⚠️ 获取 TMDb 季集数失败: {e}")
 
-    # 4. 执行过滤
-    filtered_list = [
-        res for res in all_resources 
-        if _is_resource_valid(res, filters, media_type, episode_count=episode_count)
-    ]
+    # ==============================================================================
+    # ★★★ 循环获取并分别过滤 ★★★
+    # ==============================================================================
+    final_filtered_list = []
     
-    logger.info(f"  ➜ 资源过滤: 原始 {len(all_resources)} -> 过滤后 {len(filtered_list)}")
-    return filtered_list
+    # 定义源名称映射
+    source_name_map = {
+        '115': '115分享',
+        'magnet': '磁力链',
+        'ed2k': '电驴(Ed2k)'
+    }
+
+    for source in sources_to_fetch:
+        try:
+            # 针对 ed2k 的特殊判断 (TV 不搜 ed2k)
+            if media_type == 'tv' and source == 'ed2k':
+                if episode_number is None:
+                    continue
+                
+            # 1. 获取原始资源
+            raw_res = _fetch_single_source(tmdb_id, media_type, source, season_number, episode_number)
+            
+            if not raw_res:
+                continue
+
+            # 2. 立即执行过滤
+            current_filtered = [
+                res for res in raw_res 
+                if _is_resource_valid(res, filters, media_type, episode_count=episode_count)
+            ]
+            
+            # 3. 打印带源名称的日志
+            cn_name = source_name_map.get(source, source.upper())
+            logger.info(f"  ➜ {cn_name} 资源过滤: 原始 {len(raw_res)} -> 过滤后 {len(current_filtered)}")
+            
+            # 4. 加入最终列表
+            if current_filtered:
+                final_filtered_list.extend(current_filtered)
+
+        except Exception as e:
+            logger.warning(f"  ➜ 获取 {source} 资源异常: {e}")
+
+    return final_filtered_list
 
 # ==============================================================================
 # ★★★ 115 推送逻辑  ★★★

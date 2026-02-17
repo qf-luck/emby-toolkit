@@ -116,7 +116,7 @@
               <n-form-item label="启用数据源">
                 <n-checkbox-group v-model:value="config.enabled_sources">
                   <n-space item-style="display: flex;">
-                    <n-checkbox value="115" label="115网盘" />
+                    <n-checkbox value="115" label="115分享" />
                     <n-checkbox value="magnet" label="磁力链" />
                     <n-checkbox value="ed2k" label="电驴(Ed2k)" />
                   </n-space>
