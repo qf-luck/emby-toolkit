@@ -550,9 +550,104 @@ def notify_cms_scan():
         logger.warning(f"  ⚠️ CMS 通知发送失败: {e}")
         raise e
 
-def push_to_115(resource_link, title):
+def _standardize_115_file(client, file_item, save_cid, raw_title, tmdb_id, media_type='movie'):
+    """
+    修复版：对 115 新入库的文件/文件夹进行标准化重命名
+    """
+    try:
+        # ==================================================
+        # 1. 获取官方元数据 (TMDb) - 保持原逻辑
+        # ==================================================
+        final_title = raw_title
+        final_year = None
+        
+        try:
+            tmdb_api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+            if tmdb_api_key and tmdb_id:
+                details = None
+                if media_type == 'tv':
+                    details = tmdb.get_tv_details(tmdb_id, tmdb_api_key)
+                    if details:
+                        final_title = details.get('name')
+                        first_air_date = details.get('first_air_date')
+                        if first_air_date: final_year = first_air_date[:4]
+                else:
+                    details = tmdb.get_movie_details(tmdb_id, tmdb_api_key)
+                    if details:
+                        final_title = details.get('title')
+                        release_date = details.get('release_date')
+                        if release_date: final_year = release_date[:4]
+        except Exception as e:
+            logger.warning(f"  ⚠️ [整理] TMDb 获取失败: {e}")
+
+        if not final_year:
+            match = re.search(r'[(（](\d{4})[)）]', raw_title)
+            if match: final_year = match.group(1)
+        
+        safe_title = re.sub(r'[\\/:*?"<>|]', '', final_title).strip()
+        std_name = f"{safe_title} ({final_year}) {{tmdb-{tmdb_id}}}" if final_year else f"{safe_title} {{tmdb-{tmdb_id}}}"
+
+        # ==================================================
+        # 2. 核心修复：区分 文件夹重命名 与 单文件归档
+        # ==================================================
+        # 115 文件夹标识：ico == 'folder' 或者没有 fid (只有 cid)
+        is_directory = (file_item.get('ico') == 'folder') or (not file_item.get('fid'))
+        current_name = file_item.get('n')
+
+        if current_name == std_name:
+            logger.info(f"  ✅ [整理] 名称已符合标准，跳过操作。")
+            return
+
+        if is_directory:
+            folder_id = file_item.get('cid')
+            logger.info(f"  🛠️ [整理] 识别为文件夹，执行重命名: {current_name} -> {std_name}")
+            
+            # 修复：将两个参数封装成一个元组传入
+            rename_res = client.fs_rename((folder_id, std_name)) 
+            
+            if isinstance(rename_res, dict) and rename_res.get('state'):
+                logger.info(f"  ✅ [整理] 文件夹重命名成功")
+            else:
+                logger.warning(f"  ⚠️ [整理] 重命名失败: {rename_res}")
+        
+        else:
+            # === 情况 B: 单文件归档 ===
+            file_id = file_item.get('fid')
+            logger.info(f"  🛠️ [整理] 识别为单文件，正在归档至目录: {std_name}")
+            
+            # 检查目标文件夹是否存在
+            target_dir_cid = None
+            # 这里的 search 逻辑要小心，115 的搜索返回结构可能不同
+            search_res = client.fs_files({'cid': save_cid, 'search_value': std_name})
+            if isinstance(search_res, dict) and search_res.get('data'):
+                for item in search_res['data']:
+                    if item.get('n') == std_name and (item.get('ico') == 'folder' or not item.get('fid')):
+                        target_dir_cid = item.get('cid')
+                        break
+            
+            if not target_dir_cid:
+                mkdir_res = client.fs_mkdir(std_name, save_cid)
+                if isinstance(mkdir_res, dict) and mkdir_res.get('state'):
+                    target_dir_cid = mkdir_res.get('cid')
+                else:
+                    logger.error(f"  ❌ [整理] 创建文件夹失败")
+                    return 
+
+            # 执行移动
+            move_res = client.fs_move([file_id], target_dir_cid)
+            if isinstance(move_res, dict) and move_res.get('state'):
+                logger.info(f"  ✅ [整理] 单文件已归档成功")
+            else:
+                logger.warning(f"  ⚠️ [整理] 移动文件失败")
+
+    except Exception as e:
+        # 这里会捕获到 "not enough values to unpack" 并打印具体位置
+        logger.error(f"  ⚠️ 标准化重命名流程异常: {e}", exc_info=True)
+
+def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
     """
     智能推送：支持 115/115cdn/anxia 转存 和 磁力离线
+    并执行 TMDb ID 标准化重命名
     """
     if P115Client is None:
         raise ImportError("未安装 p115 库")
@@ -574,142 +669,130 @@ def push_to_115(resource_link, title):
     
     client = P115Client(cookies)
     
+    # ==================================================
+    # ★★★ 步骤 1: 建立目录快照 (优化版) ★★★
+    # ==================================================
+    existing_ids = set()
     try:
-        # 支持 115.com, 115cdn.com, anxia.com
-        target_domains = ['115.com', '115cdn.com', 'anxia.com']
-        is_115_share = any(d in clean_url for d in target_domains) and ('magnet' not in clean_url)
-        
+        files_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
+        if files_res.get('data'):
+            for item in files_res['data']:
+                # 关键修改：文件夹取 cid，文件取 fid
+                # 如果是文件夹，n == cid (通常 115 文件夹的 fid 也是存在的，但取两者之和最稳)
+                item_id = item.get('fid') or item.get('cid') 
+                if item_id:
+                    existing_ids.add(str(item_id)) # 转为字符串防止类型不一
+    except Exception as e:
+        logger.warning(f"  ⚠️ 获取目录快照失败: {e}")
+
+    # ==================================================
+    # ★★★ 步骤 2: 执行任务 (转存 或 离线) ★★★
+    # ==================================================
+    target_domains = ['115.com', '115cdn.com', 'anxia.com']
+    is_115_share = any(d in clean_url for d in target_domains) and ('magnet' not in clean_url)
+    
+    task_success = False
+    
+    try:
         if is_115_share:
+            # --- 115 分享链接转存 ---
             logger.info(f"  ➜ [NULLBR] 识别为 115 转存任务 -> CID: {save_path_cid}")
             share_code = None
             match = re.search(r'/s/([a-z0-9]+)', clean_url)
             if match: share_code = match.group(1)
-            if not share_code: raise Exception("无法从链接中提取分享码")
+            if not share_code: raise Exception("无法提取分享码")
             receive_code = ''
             pwd_match = re.search(r'password=([a-z0-9]+)', clean_url)
             if pwd_match: receive_code = pwd_match.group(1)
             
             resp = {} 
-            try:
-                if hasattr(client, 'fs_share_import_to_dir'):
-                     resp = client.fs_share_import_to_dir(share_code, receive_code, save_path_cid)
-                elif hasattr(client, 'fs_share_import'):
-                    resp = client.fs_share_import(share_code, receive_code, save_path_cid)
-                elif hasattr(client, 'share_import'):
-                    resp = client.share_import(share_code, receive_code, save_path_cid)
-                else:
-                    api_url = "https://webapi.115.com/share/receive"
-                    payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': save_path_cid}
-                    r = client.request(api_url, method='POST', data=payload)
-                    resp = r.json() if hasattr(r, 'json') else r
-            except Exception as e:
-                raise Exception(f"调用转存接口失败: {e}")
+            if hasattr(client, 'fs_share_import_to_dir'):
+                    resp = client.fs_share_import_to_dir(share_code, receive_code, save_path_cid)
+            elif hasattr(client, 'fs_share_import'):
+                resp = client.fs_share_import(share_code, receive_code, save_path_cid)
+            elif hasattr(client, 'share_import'):
+                resp = client.share_import(share_code, receive_code, save_path_cid)
+            else:
+                # Fallback API
+                api_url = "https://webapi.115.com/share/receive"
+                payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': save_path_cid}
+                r = client.request(api_url, method='POST', data=payload)
+                resp = r.json() if hasattr(r, 'json') else r
 
             if resp and resp.get('state'):
-                logger.info(f"  ✅ 115 转存成功: {title}")
-                return True
+                logger.info(f"  ✅ 115 转存请求成功")
+                task_success = True
             else:
-                err = resp.get('error_msg') if resp else '无响应'
-                err = err or resp.get('msg') or str(resp)
+                err = resp.get('error_msg') or resp.get('msg') or str(resp)
                 raise Exception(f"转存失败: {err}")
 
         else:
-            # ==================================================
-            # ★★★ 磁力/Ed2k 离线下载 (指纹对比版) ★★★
-            # ==================================================
+            # --- 磁力/Ed2k 离线下载 ---
             logger.info(f"  ➜ [NULLBR] 识别为磁力/离线任务 -> CID: {save_path_cid}")
-            
-            # 1. 【关键步骤】建立快照：记录当前目录下已存在文件的 pick_code
-            existing_pick_codes = set()
-            try:
-                # 获取前50个文件/文件夹 (按上传时间倒序)
-                # 注意：115 API 返回的 pc (pick_code) 是唯一标识
-                files_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
-                if files_res.get('data'):
-                    for item in files_res['data']:
-                        if item.get('pc'):
-                            existing_pick_codes.add(item.get('pc'))
-            except Exception as e:
-                logger.warning(f"  ⚠️ 获取目录快照失败(可能是空目录): {e}")
-            
-            logger.info(f"  ➜ [NULLBR] 当前目录已有 {len(existing_pick_codes)} 个项目")
-
-            # 2. 添加任务
             payload = {'url[0]': clean_url, 'wp_path_id': save_path_cid}
             resp = client.offline_add_urls(payload)
             
             if resp.get('state'):
-                # 获取 info_hash 用于辅助检查死链
-                result_list = resp.get('result', [])
-                info_hash = None
-                if result_list and isinstance(result_list, list):
-                    info_hash = result_list[0].get('info_hash')
-
-                # 3. 轮询检测目录 (延长到 45秒)
-                # 文件夹生成比较慢，给足时间
-                max_retries = 3  # 15次 * 3秒 = 45秒
-                success_found = False
-                
-                logger.info(f"  ➜ [NULLBR] 任务已提交，正在扫描新项目...")
-
-                for i in range(max_retries):
-                    time.sleep(3) 
-                    
-                    # --- A. 检查目录是否有【不在快照里】的新项目 ---
-                    try:
-                        check_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
-                        if check_res.get('data'):
-                            for item in check_res['data']:
-                                current_pc = item.get('pc')
-                                # 如果发现一个 pick_code 不在旧集合里，说明是新生成的
-                                if current_pc and (current_pc not in existing_pick_codes):
-                                    item_name = item.get('n', '未知')
-                                    logger.info(f"  ✅ [第{i+1}次检查] 发现新项目: {item_name}")
-                                    success_found = True
-                                    break
-                        if success_found:
-                            break
-                    except Exception as e:
-                        pass # 网络波动忽略
-
-                    # --- B. 辅助检查：任务是否挂了 ---
-                    try:
-                        list_resp = client.offline_list(page=1)
-                        tasks = list_resp.get('tasks', [])
-                        for task in tasks[:10]:
-                            if info_hash and task.get('info_hash') == info_hash:
-                                if task.get('status') == -1:
-                                    try: client.offline_delete([task.get('info_hash')])
-                                    except: pass
-                                    raise Exception("115任务状态变为[下载失败]")
-                    except Exception as task_err:
-                        if "下载失败" in str(task_err): raise task_err
-                        pass
-
-                if success_found:
-                    logger.info(f"  ✅ [NULLBR] 115 离线成功: {title}")
-                    return True
-                else:
-                    # 超时未发现新文件
-                    try: 
-                        if info_hash: client.offline_delete([info_hash])
-                    except: pass
-                    
-                    logger.warning(f"  [NULLBR] ❌ 未在目录发现新项目，判定为死链")
-                    raise Exception("资源无效，请换个源试试")
-
+                task_success = True
+                # 离线任务需要等待
+                logger.info(f"  ➜ [NULLBR] 任务已提交，等待文件生成...")
             else:
                 err = resp.get('error_msg') or resp.get('msg') or '未知错误'
                 if '已存在' in str(err):
-                    logger.info(f"  ✅ 任务已存在: {title}")
-                    return True
-                raise Exception(f"离线失败: {err}")
+                    task_success = True
+                    logger.info(f"  ✅ 任务已存在")
+                else:
+                    raise Exception(f"离线失败: {err}")
 
     except Exception as e:
-        logger.error(f"  ➜ 115 推送异常: {e}")
-        if "Login" in str(e) or "cookie" in str(e).lower():
-            raise Exception("115 Cookie 无效")
         raise e
+
+    # ==================================================
+    # ★★★ 步骤 3: 扫描新文件并重命名 ★★★
+    # ==================================================
+    if task_success:
+        # 轮询查找新文件 (最多等待 15秒)
+        max_retries = 5
+        found_item = None
+        
+        for i in range(max_retries):
+            time.sleep(3)
+            try:
+                check_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
+                if check_res.get('data'):
+                    for item in check_res['data']:
+                        # 关键修改：同时检查 fid 和 cid
+                        current_id = item.get('fid') or item.get('cid')
+                        if current_id and (str(current_id) not in existing_ids):
+                            found_item = item
+                            break
+                if found_item:
+                    break
+            except Exception as e:
+                logger.debug(f"轮询出错: {e}")
+        
+        if found_item:
+            item_name = found_item.get('n', '未知')
+            logger.info(f"  ✅ 捕获到新入库项目: {item_name}")
+            
+            # ★★★ 执行重命名 ★★★
+            if tmdb_id:
+                _standardize_115_file(client, found_item, save_path_cid, title, tmdb_id)
+            else:
+                logger.debug("  ⚠️ 未提供 TMDb ID，跳过重命名")
+            
+            return True
+        else:
+            if is_115_share:
+                # 分享转存通常很快，如果没找到可能是因为文件已存在没产生新ID，或者转存到了子文件夹
+                logger.warning("  ⚠️ 转存显示成功但未捕获到新文件ID (可能文件已存在)")
+                return True
+            else:
+                # 离线下载超时
+                logger.warning("  ❌ 离线任务超时，未在目录发现新文件 (死链或下载过慢)")
+                raise Exception("资源下载超时或死链")
+
+    return False
 
 def get_115_account_info():
     """
@@ -742,12 +825,12 @@ def get_115_account_info():
     except Exception as e:
         raise Exception("Cookie 无效或网络不通")
 
-def handle_push_request(link, title):
+def handle_push_request(link, title, tmdb_id=None, media_type=None):
     """
     统一推送入口
     """
-    # 1. 推送到 115 (如果失败或死链，这里会直接抛出异常，中断流程)
-    push_to_115(link, title)
+    # 1. 推送到 115 (传递 ID 以便重命名)
+    push_to_115(link, title, tmdb_id, media_type)
     
     # 2. 115 成功后，通知 CMS 整理
     notify_cms_scan()
@@ -791,7 +874,7 @@ def auto_download_best_resource(tmdb_id, media_type, title, season_number=None, 
                     logger.info(f"  👉 尝试第 {index + 1} 个资源: {res['title']}")
                     
                     # 调用统一推送入口 (115 -> CMS Notify)
-                    handle_push_request(res['link'], title)
+                    handle_push_request(res['link'], title, tmdb_id, media_type)
                     
                     logger.info(f"  ✅ 资源推送成功，停止后续尝试。")
                     return True

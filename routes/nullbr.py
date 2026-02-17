@@ -112,7 +112,12 @@ def get_resources():
 def push_resource():
     data = request.json
     try:
-        nullbr_handler.handle_push_request(data.get('link'), data.get('title', '未知资源'))
+        nullbr_handler.handle_push_request(
+            data.get('link'), 
+            data.get('title', '未知资源'),
+            tmdb_id=data.get('tmdb_id'),
+            media_type=data.get('media_type')
+        )
         return jsonify({"status": "success", "message": "已添加至 115 离线任务"})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
