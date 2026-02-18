@@ -147,7 +147,7 @@ def get_movie_details(movie_id: int, api_key: str, append_to_response: Optional[
         # 优先使用传入的参数，否则使用默认值
         "include_image_language": include_image_language if include_image_language is not None else default_img_lang
     }
-    logger.trace(f"TMDb: 获取电影详情 (ID: {movie_id})")
+    logger.trace(f"  ➜ TMDb: 获取电影详情 (ID: {movie_id})")
     details = _tmdb_request(endpoint, api_key, params)
     
     # ... (保留原本的英文标题补充逻辑) ...
@@ -159,12 +159,12 @@ def get_movie_details(movie_id: int, api_key: str, append_to_response: Optional[
                     logger.trace(f"  从translations补充电影英文名: {details['english_title']}")
                     break
         if not details.get("english_title"):
-            logger.trace(f"  尝试获取电影 {movie_id} 的英文名...")
+            logger.trace(f"  ➜ 尝试获取电影 {movie_id} 的英文名...")
             en_params = {"language": "en-US"}
             en_details = _tmdb_request(f"/movie/{movie_id}", api_key, en_params)
             if en_details and en_details.get("title"):
                 details["english_title"] = en_details.get("title")
-                logger.trace(f"  通过请求英文版补充电影英文名: {details['english_title']}")
+                logger.trace(f"  ➜ 通过请求英文版补充电影英文名: {details['english_title']}")
     elif details and details.get("original_language") == "en":
         details["english_title"] = details.get("original_title")
 
@@ -187,7 +187,7 @@ def get_tv_details(tv_id: int, api_key: str, append_to_response: Optional[str] =
         # 优先使用传入的参数，否则使用默认值
         "include_image_language": include_image_language if include_image_language is not None else default_img_lang
     }
-    logger.trace(f"TMDb: 获取电视剧详情 (ID: {tv_id})")
+    logger.trace(f"  ➜ TMDb: 获取电视剧详情 (ID: {tv_id})")
     details = _tmdb_request(endpoint, api_key, params)
     
     # ... (保留原本的英文标题补充逻辑) ...
@@ -199,12 +199,12 @@ def get_tv_details(tv_id: int, api_key: str, append_to_response: Optional[str] =
                     logger.trace(f"  从translations补充剧集英文名: {details['english_name']}")
                     break
         if not details.get("english_name"):
-            logger.trace(f"  尝试获取剧集 {tv_id} 的英文名...")
+            logger.trace(f"  ➜ 尝试获取剧集 {tv_id} 的英文名...")
             en_params = {"language": "en-US"}
             en_details = _tmdb_request(f"/tv/{tv_id}", api_key, en_params)
             if en_details and en_details.get("name"):
                 details["english_name"] = en_details.get("name")
-                logger.trace(f"  通过请求英文版补充剧集英文名: {details['english_name']}")
+                logger.trace(f"  ➜ 通过请求英文版补充剧集英文名: {details['english_name']}")
     elif details and details.get("original_language") == "en":
         details["english_name"] = details.get("original_name")
 
