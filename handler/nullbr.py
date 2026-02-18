@@ -831,8 +831,8 @@ class SmartOrganizer:
             return new_name, None
 
     def execute(self, root_item, target_cid):
-        """执行整理：重命名 + 移动 + 清理垃圾"""
-        # 1. 准备标准名称
+        """执行整理：区分单文件归档与文件夹整理"""
+        # 1. 准备标准名称 (作为文件夹名)
         title = self.details.get('title') or self.original_title
         date_str = self.details.get('date') or ''
         year = date_str[:4] if date_str else ''
@@ -841,16 +841,52 @@ class SmartOrganizer:
         safe_title = re.sub(r'[\\/:*?"<>|]', '', title).strip()
         std_root_name = f"{safe_title} ({year}) {{tmdb-{self.tmdb_id}}}" if year else f"{safe_title} {{tmdb-{self.tmdb_id}}}"
         
-        # 2. 重命名根节点 (文件夹或单文件)
+        # 2. 识别类型
         root_id = root_item.get('fid') or root_item.get('cid')
-        is_folder = (root_item.get('ico') == 'folder') or (not root_item.get('fid'))
+        # 115 API: 有 fid 的是文件，没有 fid (只有 cid) 的是文件夹
+        is_file = bool(root_item.get('fid'))
         
-        logger.info(f"  🛠️ [整理] 重命名根节点: {root_item.get('n')} -> {std_root_name}")
-        self.client.fs_rename((root_id, std_root_name))
-        
-        # 3. 如果是文件夹，进入内部处理 (重命名视频文件 + 剧集归类 + 垃圾清理)
-        if is_folder:
-            # 获取文件夹内所有文件
+        # ==================================================
+        # 分支 A: 单文件处理 (创建文件夹 -> 移动 -> 改名)
+        # ==================================================
+        if is_file:
+            logger.info(f"  🛠️ [整理] 识别为单文件，执行归档模式...")
+            
+            # A1. 确定新文件夹创建在哪里
+            # 如果有目标 target_cid (命中规则)，就去那里建
+            # 如果没有 (未命中规则)，就在当前文件所在的目录建 (root_item['cid'] 即为父目录id)
+            dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else root_item.get('cid')
+            
+            # A2. 创建标准命名的文件夹
+            mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
+            new_folder_cid = mk_res.get('cid')
+            
+            if not new_folder_cid:
+                logger.error(f"  ❌ [整理] 创建文件夹失败: {std_root_name}")
+                return False
+                
+            # A3. 将文件移动到新文件夹内
+            self.client.fs_move(root_id, new_folder_cid)
+            
+            # A4. 重命名文件本身 (加上后缀和Tags)
+            new_filename, _ = self._rename_file_node(root_item, safe_title, is_tv=(self.media_type=='tv'))
+            
+            if new_filename != root_item.get('n'):
+                self.client.fs_rename((root_id, new_filename))
+                logger.info(f"  ✅ [整理] 单文件归档完成: {new_filename}")
+            else:
+                logger.info(f"  ✅ [整理] 单文件归档完成 (无需改名)")
+
+        # ==================================================
+        # 分支 B: 文件夹处理 (重命名文件夹 -> 内部整理 -> 移动)
+        # ==================================================
+        else:
+            logger.info(f"  🛠️ [整理] 识别为文件夹，执行重命名: {root_item.get('n')} -> {std_root_name}")
+            
+            # B1. 重命名根文件夹
+            self.client.fs_rename((root_id, std_root_name))
+            
+            # B2. 进入内部处理 (重命名视频文件 + 剧集归类 + 垃圾清理)
             files_res = self.client.fs_files({'cid': root_id, 'limit': 1000})
             if files_res.get('data'):
                 season_folders_cache = {} # { season_num: folder_cid }
@@ -861,58 +897,45 @@ class SmartOrganizer:
                 
                 for sub_file in files_res['data']:
                     fid = sub_file.get('fid')
-                    if not fid: continue # 忽略子文件夹，只处理文件
+                    if not fid: continue # 忽略子文件夹
                     
                     file_name = sub_file.get('n', '')
-                    # 115返回的 ico 字段通常就是后缀，但有时候不准，用文件名后缀更稳
                     ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
                     
-                    # --- A. 垃圾清理逻辑 ---
+                    # --- 垃圾清理 ---
                     is_video = ext in video_exts
                     is_sub = ext in sub_exts
                     
-                    # 如果既不是视频也不是字幕，直接删除
                     if not (is_video or is_sub):
                         logger.info(f"  🗑️ [整理] 删除垃圾文件: {file_name}")
                         self.client.fs_delete([fid])
                         continue
                         
-                    # 2. 额外检查：如果是视频文件但极小 (<100MB)，视为 Sample/广告，删除
+                    # 视频大小检查 (<100MB 删除)
                     if is_video:
                         should_delete = False
                         raw_size = sub_file.get('size')
-                        
                         try:
-                            # 情况1: API返回的是字节整数 (int)
                             if isinstance(raw_size, (int, float)):
-                                if raw_size < 100 * 1024 * 1024: # 100MB in bytes
-                                    should_delete = True
-                            
-                            # 情况2: API返回的是格式化字符串 (str) 如 "32.98MB", "600KB"
+                                if raw_size < 100 * 1024 * 1024: should_delete = True
                             elif isinstance(raw_size, str):
                                 s_upper = raw_size.upper().replace(',', '')
-                                if 'GB' in s_upper or 'TB' in s_upper:
-                                    should_delete = False # 大文件肯定保留
-                                elif 'KB' in s_upper or 'BYTES' in s_upper: 
-                                    should_delete = True  # KB级别肯定删
-                                elif 'MB' in s_upper:
-                                    # 提取数字部分进行判断
-                                    match = re.search(r'([\d\.]+)', s_upper)
-                                    if match and float(match.group(1)) < 100: # 阈值 100MB
-                                        should_delete = True
-                        except Exception:
-                            pass # 解析失败保守起见不删
+                                if 'GB' not in s_upper and 'TB' not in s_upper:
+                                    if 'KB' in s_upper or 'BYTES' in s_upper: should_delete = True
+                                    elif 'MB' in s_upper:
+                                        match = re.search(r'([\d\.]+)', s_upper)
+                                        if match and float(match.group(1)) < 100: should_delete = True
+                        except: pass
 
                         if should_delete:
-                            logger.info(f"  🗑️ [整理] 删除过小视频(Sample/广告, Size={raw_size}): {file_name}")
+                            logger.info(f"  🗑️ [整理] 删除过小视频: {file_name}")
                             self.client.fs_delete([fid])
                             continue
                     
-                    # --- B. 视频文件重命名 ---
+                    # --- 视频文件重命名 ---
                     if is_video:
                         new_filename, season_num = self._rename_file_node(sub_file, safe_title, is_tv=(self.media_type=='tv'))
                         
-                        # 执行文件重命名
                         if new_filename != file_name:
                             self.client.fs_rename((fid, new_filename))
                         
@@ -920,9 +943,7 @@ class SmartOrganizer:
                         if self.media_type == 'tv' and season_num is not None:
                             s_folder_cid = season_folders_cache.get(season_num)
                             if not s_folder_cid:
-                                # 检查或创建 Season XX 目录
                                 s_name = f"Season {season_num:02d}"
-                                # 先在当前目录下找
                                 found = False
                                 for existing in files_res['data']:
                                     if existing.get('n') == s_name and existing.get('cid'):
@@ -930,27 +951,18 @@ class SmartOrganizer:
                                         found = True
                                         break
                                 if not found:
-                                    # 创建
                                     mk_res = self.client.fs_mkdir(s_name, root_id)
-                                    if mk_res.get('state'):
-                                        s_folder_cid = mk_res.get('cid')
+                                    if mk_res.get('state'): s_folder_cid = mk_res.get('cid')
                                 
-                                if s_folder_cid:
-                                    season_folders_cache[season_num] = s_folder_cid
+                                if s_folder_cid: season_folders_cache[season_num] = s_folder_cid
                             
-                            # 移动文件到季目录
                             if s_folder_cid:
                                 self.client.fs_move(fid, s_folder_cid)
-                    
-                    # --- C. 字幕文件重命名 (简单跟随视频名，或者保留原名) ---
-                    # 字幕重命名比较复杂，因为要匹配对应的视频。
-                    # 简单策略：如果只有一个视频，字幕改成视频同名。
-                    # 复杂策略暂不实现，保留原名，只做保留不删除。
 
-        # 4. 整体移动到目标 CID
-        if target_cid and str(target_cid) != '0':
-            logger.info(f"  🚚 [整理] 移动到分类目录 CID: {target_cid}")
-            self.client.fs_move(root_id, target_cid)
+            # B3. 整体移动到目标 CID
+            if target_cid and str(target_cid) != '0':
+                logger.info(f"  🚚 [整理] 移动文件夹到分类目录 CID: {target_cid}")
+                self.client.fs_move(root_id, target_cid)
         
         return True
 
