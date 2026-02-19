@@ -158,7 +158,12 @@
                 </n-form-item>
                 <n-form-item label="待整理目录">
                   <n-input-group>
-                    <n-input :value="config.p115_save_path_cid" placeholder="请选择目录" readonly @click="openFolderSelector('config', config.p115_save_path_cid)">
+                    <n-input 
+                      :value="config.p115_save_path_name || config.p115_save_path_cid" 
+                      placeholder="请选择目录" 
+                      readonly 
+                      @click="openFolderSelector('config', config.p115_save_path_cid)"
+                    >
                       <template #prefix><n-icon :component="FolderIcon" /></template>
                     </n-input>
                     <n-button type="primary" ghost @click="openFolderSelector('config', config.p115_save_path_cid)">
@@ -599,15 +604,26 @@
       </template>
     </n-modal>
     <!-- 规则管理模态框 -->
-    <n-modal v-model:show="showRuleManagerModal" preset="card" title="分类规则管理" style="width: 800px; max-width: 95%; height: 80vh;">
+    <n-modal 
+      v-model:show="showRuleManagerModal" 
+      preset="card" 
+      title="分类规则管理" 
+      style="width: 800px; max-width: 95%; height: 80vh;"
+      content-style="display: flex; flex-direction: column; overflow: hidden;" 
+    >
       <template #header-extra>
         <n-tag type="warning" size="small" :bordered="false">拖拽可调整优先级</n-tag>
       </template>
       
-      <div style="display: flex; flex-direction: column; height: 100%;">
+      <!-- 
+         修改说明：
+         1. 外层 n-modal 增加了 content-style="display: flex; ..." 
+         2. 下面的 div 去掉了 height: 100%，改为 flex: 1，确保占满剩余空间
+      -->
+      <div style="display: flex; flex-direction: column; flex: 1; min-height: 0;">
         <!-- 规则列表区域 (可滚动) -->
         <div style="flex: 1; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
-          <div class="rules-container" style="border: none; background: transparent; padding: 0;">
+          <div class="rules-container">
             <draggable 
               v-model="sortingRules" 
               item-key="id" 
@@ -625,7 +641,7 @@
                     </div>
                     <div class="rule-desc">
                         <n-tag size="tiny" :bordered="false" type="info">目录: {{ rule.dir_name }}</n-tag>
-                        <span style="margin-left: 8px; font-size: 12px; color: #666;">{{ getRuleSummary(rule) }}</span>
+                        <span style="margin-left: 8px; font-size: 12px; opacity: 0.7;">{{ getRuleSummary(rule) }}</span>
                     </div>
                   </div>
                   <div class="rule-actions">
@@ -655,8 +671,8 @@
           </div>
         </div>
 
-        <!-- 底部操作区 -->
-        <div style="border-top: 1px solid #eee; padding-top: 16px;">
+        <!-- 底部操作区 (固定在底部) -->
+        <div style="border-top: 1px solid var(--n-divider-color); padding-top: 16px; flex-shrink: 0;">
           <n-button type="primary" dashed block @click="addRule">
             <template #icon><n-icon :component="AddIcon" /></template>
             添加新规则
@@ -800,6 +816,7 @@ const config = reactive({
   api_key: '',
   p115_cookies: '',
   p115_save_path_cid: '',
+  p115_save_path_name: '',
   cms_url: '',    
   cms_token: '',
   enabled_sources: ['115', 'magnet', 'ed2k'], 
@@ -890,6 +907,9 @@ const loadConfig = async () => {
     const res = await axios.get('/api/nullbr/config');
     if (res.data) {
       Object.assign(config, res.data);
+      if (!config.p115_save_path_name && config.p115_save_path_cid) {
+          config.p115_save_path_name = config.p115_save_path_cid; 
+      }
     }
     const resPresets = await axios.get('/api/nullbr/presets');
     if (resPresets.data) config.presets = resPresets.data;
@@ -1303,20 +1323,19 @@ const handleCreateFolder = async () => {
 // 确认选择
 const confirmFolderSelection = () => {
   const cid = currentBrowserCid.value;
-  // 根目录显示 "/"，其他显示文件夹名 (或者你可以拼接完整路径，但 API 没返回完整路径，这里简化显示)
+  // 根目录显示 "/"，其他显示文件夹名
   const name = cid === '0' ? '/' : currentBrowserFolderName.value; 
   
   if (selectorContext.value.type === 'config') {
     config.p115_save_path_cid = cid;
-    // 可以在 config 里加个临时字段存名字用于显示，或者只存 CID
-    // 这里假设 config 只有 p115_save_path_cid，显示时我们只显示 CID 或 "已选择: Name"
-    message.success(`保存目录已更新为: ${name}`);
+    config.p115_save_path_name = name; // <--- 核心修改：保存名称用于显示
+    message.success(`已选择目录: ${name}`);
   } else if (selectorContext.value.type === 'rule') {
     currentRule.value.cid = cid;
     currentRule.value.dir_name = name;
   }
   
-  showFolderPopover.value = false; // ★★★ 自动关闭 ★★★
+  showFolderPopover.value = false;
 };
 
 const MediaCard = defineComponent({
@@ -1671,17 +1690,18 @@ onMounted(async () => {
 .rule-info { flex: 1; }
 .rule-name { font-weight: bold; font-size: 13px; }
 .rule-actions { display: flex; align-items: center; gap: 4px; }
-/* 目录浏览器样式优化 */
+/* 目录浏览器样式优化 - 全面适配 Naive UI 主题变量 */
 .folder-browser {
   display: flex;
   flex-direction: column;
   height: 500px;
-  /* 使用 Naive UI 变量 */
-  background-color: var(--n-card-color); 
-  color: var(--n-text-color-1);
+  /* 关键：使用 Naive UI 的模态框背景色变量，而不是写死颜色 */
+  background-color: var(--n-color-modal); 
+  color: var(--n-text-color);
   border-radius: 4px;
   overflow: hidden;
   border: 1px solid var(--n-divider-color);
+  transition: background-color 0.3s, color 0.3s;
 }
 
 .browser-header {
@@ -1690,7 +1710,7 @@ onMounted(async () => {
   align-items: center;
   padding: 10px 16px;
   border-bottom: 1px solid var(--n-divider-color);
-  /* 使用稍微深一点/浅一点的背景色变量，或者用 action-color */
+  /* 头部使用稍微不同的背景色 (action-color 通常是浅灰或深灰) */
   background-color: var(--n-action-color); 
   flex-shrink: 0;
 }
@@ -1711,19 +1731,32 @@ onMounted(async () => {
   margin-left: 8px;
   display: flex;
   align-items: center;
-  color: var(--n-text-color-3);
+  color: var(--n-text-color-3); /* 三级文字颜色 */
 }
-.crumb-item { cursor: pointer; transition: color 0.2s; }
-.crumb-item:hover { color: var(--n-primary-color); }
-.crumb-item.current { color: var(--n-text-color-1); font-weight: 600; cursor: default; }
-.separator { margin: 0 6px; color: var(--n-text-color-disabled); }
+
+.crumb-item { 
+  cursor: pointer; 
+  transition: color 0.2s; 
+}
+.crumb-item:hover { 
+  color: var(--n-primary-color); 
+}
+.crumb-item.current { 
+  color: var(--n-text-color-1); /* 主要文字颜色 */
+  font-weight: 600; 
+  cursor: default; 
+}
+.separator { 
+  margin: 0 6px; 
+  color: var(--n-text-color-disabled); 
+}
 
 /* 列表区域 */
 .folder-list-container {
   flex: 1;
   overflow-y: auto;
   position: relative;
-  background-color: transparent;
+  background-color: transparent; /* 透明背景，透出外层的 modal 颜色 */
 }
 
 .folder-list {
@@ -1740,8 +1773,9 @@ onMounted(async () => {
   color: var(--n-text-color-2);
 }
 
+/* 悬停效果：使用 Naive UI 定义的 hover 颜色 */
 .folder-item:hover {
-  background-color: var(--n-hover-color); /* Naive UI 的悬停色 */
+  background-color: var(--n-hover-color); 
 }
 
 .folder-icon-wrapper {
@@ -1756,6 +1790,7 @@ onMounted(async () => {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  color: var(--n-text-color-1); /* 强制使用主要文字颜色 */
 }
 
 /* 底部栏 */
@@ -1765,7 +1800,7 @@ onMounted(async () => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  background-color: var(--n-card-color);
+  background-color: var(--n-color-modal);
   flex-shrink: 0;
 }
 
@@ -1774,23 +1809,31 @@ onMounted(async () => {
     font-size: 12px;
 }
 
-/* 暗色模式适配 */
-@media (prefers-color-scheme: dark) {
-  .folder-browser, .browser-header, .browser-footer {
-    background: #2c2c2c;
-    border-color: #444;
-  }
-  .folder-item {
-    border-color: #333;
-  }
-  .folder-item:hover {
-    background-color: #3a3a3a;
-  }
-  .folder-name {
-    color: #ddd;
-  }
-  .crumb-item.current {
-    color: #fff;
-  }
+/* 规则列表项的样式修复 (确保在亮色模式下也能看清) */
+.rule-item {
+  display: flex;
+  align-items: center;
+  /* 使用 action-color 作为背景，自动适配明暗 */
+  background-color: var(--n-action-color); 
+  border: 1px solid var(--n-divider-color);
+  padding: 12px;
+  margin-bottom: 8px;
+  border-radius: 6px;
+  transition: all 0.2s;
+}
+
+.rule-item:hover {
+  border-color: var(--n-primary-color);
+  background-color: var(--n-hover-color);
+}
+
+.rule-name {
+  color: var(--n-text-color-1);
+  font-weight: bold;
+  font-size: 13px;
+}
+
+.rule-desc span {
+  color: var(--n-text-color-3);
 }
 </style>
