@@ -1208,7 +1208,9 @@ class SmartOrganizer:
         logger.info(f"  🚀 [115] 目标不存在，执行整目录移动: {root_item.get('name')} -> {dest_parent_cid}")
         
         # 3.2 移动整个文件夹到分类目录
+        logger.info(f"DEBUG -> 准备移动: {source_cid} 到 {dest_parent_cid}")
         move_res = self.client.fs_move({"fid": source_cid, "pid": dest_parent_cid})
+        logger.info(f"DEBUG -> 接口原始返回: {move_res}")
         if move_res.get('state'):
             logger.info(f"  ✅ [整理] 整目录移动成功！")
             return True
