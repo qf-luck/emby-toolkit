@@ -586,11 +586,17 @@ def emby_webhook():
             target_cid = organizer.get_target_cid()
             
             if target_cid:
-                # 获取真实文件对象 
+                # ★★★ 核心修复 1: 优化获取真实文件逻辑 (增加排序) ★★★
                 real_root_item = None
                 try:
-                    # MP 的临时目录里通常只有这一个文件，limit 设小点就行
-                    res = client.fs_files({'cid': current_parent_cid, 'limit': 50})
+                    # 增加排序：按修改时间倒序 (o='user_ptime', asc=0)
+                    # 这样刚上传的文件一定在第一个，绝对能抓到
+                    res = client.fs_files({
+                        'cid': current_parent_cid, 
+                        'limit': 50, 
+                        'o': 'user_ptime', 
+                        'asc': 0
+                    })
                     if res.get('data'):
                         for item in res['data']:
                             # 匹配文件ID (fid) 或 文件夹ID (cid)
@@ -600,26 +606,40 @@ def emby_webhook():
                 except Exception as e:
                     logger.warning(f"  ⚠️ 获取真实文件信息失败: {e}")
 
-                # 如果万一没取到（极低概率），才用伪装数据兜底
+                # ★★★ 核心修复 2: 修复兜底逻辑 (防止误判为文件夹) ★★★
                 if not real_root_item:
-                    logger.warning("  ⚠️ 未能获取文件详情，使用基础信息兜底...")
+                    logger.warning("  ⚠️ 未能获取文件详情，使用基础信息兜底 (已启用安全模式)...")
                     real_root_item = {
                         'n': target_item.get("name"),
-                        'cid': current_parent_cid
+                        'cid': current_parent_cid,
+                        's': 1024 * 1024 * 1024 # 伪造 1GB 大小，防止被过滤器误删
                     }
-                    if target_item.get("type", 1) == 1: # 文件
-                        real_root_item['fid'] = file_id
-                    else: # 文件夹
+                    
+                    # 严谨的类型判断：MP 的 type 可能是 int 1 或 str "1"
+                    raw_type = target_item.get("type", 1)
+                    is_folder = False
+                    try:
+                        if int(raw_type) == 0:
+                            is_folder = True
+                    except: pass
+
+                    if is_folder:
+                        # 只有明确是文件夹时，才设置 cid
                         real_root_item['cid'] = file_id
+                        # 移除 fid 确保进入文件夹模式
+                        if 'fid' in real_root_item: del real_root_item['fid']
+                    else:
+                        # 默认为文件！设置 fid！
+                        # 只要有 fid，execute 就不会递归扫描，绝对安全
+                        real_root_item['fid'] = file_id
 
                 logger.info(f"  🚀 [MP上传] 转交 SmartOrganizer.execute 处理: {real_root_item.get('n')}")
                 
-                # 复用最稳的 execute 逻辑
+                # 复用 execute 逻辑
                 success = organizer.execute(real_root_item, target_cid)
                 
                 if success:
-                    # ★★★ 核心修复 2: 强制删除 MP 临时目录 (解决源目录未删除) ★★★
-                    # execute 在单文件模式下不会删父目录，所以这里我们要手动补一刀
+                    # 强制删除 MP 临时目录
                     if current_parent_cid and str(current_parent_cid) != '0':
                         try:
                             logger.info(f"  🧹 [MP上传] 清理临时目录: {current_parent_cid}")
@@ -640,6 +660,7 @@ def emby_webhook():
         except Exception as e:
             logger.error(f"  ❌ [MP上传] 处理失败: {e}", exc_info=True)
             return jsonify({"status": "error", "message": str(e)}), 500
+        
     logger.debug(f"  ➜ 收到Emby Webhook: {event_type}")
 
     USER_DATA_EVENTS = [
