@@ -546,10 +546,15 @@ def emby_webhook():
         try:
             transfer_info = data.get("data", {}).get("transferinfo", {})
             media_info = data.get("data", {}).get("mediainfo", {})
+            meta_info = data.get("data", {}).get("meta", {}) # ★★★ 获取 meta 信息 ★★★
             
             # 115 文件 ID
             target_item = transfer_info.get("target_item", {})
             file_id = target_item.get("fileid")
+            
+            # ★★★ 直接从 meta 获取季号 (整数) ★★★
+            # begin_season 通常是当前文件的季号
+            season_number = meta_info.get("begin_season")
             
             # 115 当前父目录 ID (MP 创建的目录)
             target_dir = transfer_info.get("target_diritem", {})
@@ -586,7 +591,8 @@ def emby_webhook():
             target_cid = organizer.get_target_cid()
             
             if target_cid:
-                organizer.execute_move_only(file_id, current_cid, target_cid)
+                # ★★★ 传入 season_number ★★★
+                organizer.execute_move_only(file_id, current_cid, target_cid, season_number=season_number)
                 logger.info("  📣 [MP上传] 整理完成，通知 CMS 执行增量同步...")
                 notify_cms_scan()
                 return jsonify({"status": "success_file_moved"}), 200

@@ -1178,16 +1178,17 @@ class SmartOrganizer:
         logger.info(f"  ✅ [整理] 完成。共迁移 {moved_count} 个文件。")
         return True
     
-    def execute_move_only(self, file_id, current_cid, target_cid):
+    def execute_move_only(self, file_id, current_cid, target_cid, season_number=None):
         """
         [MP 对接专用] 仅执行移动操作，不重命名。
         用于处理 MoviePilot 已经整理好的文件，将其归类到指定目录。
+        修复：直接使用传入的 season_number，并增强文件夹查找鲁棒性
         """
         if not target_cid or str(target_cid) == '0':
             logger.info("  ⚠️ [MP对接] 未命中分类规则或目标CID为0，跳过移动。")
             return False
 
-        # 1. 准备标准名称 (文件夹名)
+        # 1. 准备标准名称 (剧集/电影 根文件夹名)
         title = self.details.get('title') or self.original_title
         date_str = self.details.get('date') or ''
         year = date_str[:4] if date_str else ''
@@ -1199,35 +1200,93 @@ class SmartOrganizer:
         # 2. 获取或创建目标标准文件夹 (在目标分类CID下)
         final_home_cid = None
         
-        # 策略 1: 查找
+        # 策略 A: 先尝试查找
         try:
             search_res = self.client.fs_files({'cid': target_cid, 'search_value': std_root_name, 'limit': 1})
             if search_res.get('data'):
                 for item in search_res['data']:
-                    if item.get('n') == std_root_name and not item.get('fid'):
+                    if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
                         final_home_cid = item.get('cid')
                         break
         except: pass
 
-        # 策略 2: 创建
+        # 策略 B: 如果没找到，尝试创建
         if not final_home_cid:
             mk_res = self.client.fs_mkdir(std_root_name, target_cid)
             if mk_res.get('state'):
                 final_home_cid = mk_res.get('cid')
+            else:
+                # ★★★ 关键修复：创建失败可能是因为并发已存在，必须再次查找 ★★★
+                # 115 API 如果目录已存在，mkdir 会返回 false，导致 final_home_cid 为空，进而报错
+                time.sleep(0.5) # 稍微缓冲
+                try:
+                    search_res = self.client.fs_files({'cid': target_cid, 'search_value': std_root_name, 'limit': 1})
+                    if search_res.get('data'):
+                        for item in search_res['data']:
+                            if item.get('n') == std_root_name:
+                                final_home_cid = item.get('cid')
+                                break
+                except: pass
         
         if not final_home_cid:
-            logger.error(f"  ❌ [MP上传] 无法创建目标文件夹，移动终止。")
+            logger.error(f"  ❌ [MP上传] 无法创建或找到剧集根目录 [{std_root_name}] (CID:{target_cid})，移动终止。")
             return False
 
+        # ==================================================
+        # ★★★ 季文件夹处理逻辑 (直接使用传入的 season_number) ★★★
+        # ==================================================
+        dest_cid = final_home_cid # 默认移动到根目录
+
+        if self.media_type == 'tv' and season_number is not None:
+            try:
+                s_num = int(season_number)
+                season_folder_name = f"Season {s_num:02d}"
+                season_cid = None
+                
+                # 1. 查找 Season 目录
+                try:
+                    s_res = self.client.fs_files({'cid': final_home_cid, 'search_value': season_folder_name, 'limit': 1})
+                    if s_res.get('data'):
+                        for item in s_res['data']:
+                            if item.get('n') == season_folder_name and not item.get('fid'):
+                                season_cid = item.get('cid')
+                                break
+                except: pass
+
+                # 2. 创建 Season 目录
+                if not season_cid:
+                    s_mk = self.client.fs_mkdir(season_folder_name, final_home_cid)
+                    if s_mk.get('state'):
+                        season_cid = s_mk.get('cid')
+                    else:
+                        # 同样做一次兜底查找
+                        time.sleep(0.2)
+                        try:
+                            s_res = self.client.fs_files({'cid': final_home_cid, 'search_value': season_folder_name, 'limit': 1})
+                            if s_res.get('data'):
+                                season_cid = s_res['data'][0].get('cid')
+                        except: pass
+                
+                if season_cid:
+                    dest_cid = season_cid # 更新目标为季目录
+                    logger.info(f"  📂 [MP上传] 识别到第 {s_num} 季，将存入: {season_folder_name}")
+                else:
+                    logger.warning(f"  ⚠️ [MP上传] 创建季目录失败: {season_folder_name}，将存入根目录。")
+
+            except Exception as e:
+                logger.warning(f"  ⚠️ [MP上传] 季目录处理异常: {e}")
+
         # 3. 移动文件
-        move_res = self.client.fs_move(file_id, final_home_cid)
+        move_res = self.client.fs_move(file_id, dest_cid)
         if move_res.get('state'):
             logger.info(f"  ✅ [MP上传] 文件移动成功。")
             
             # 4. 尝试删除 MP留下的空文件夹 (current_cid)
             # 只有当 current_cid 不是根目录时才删
             if current_cid and str(current_cid) != '0':
-                self.client.fs_delete([current_cid])
+                try:
+                    self.client.fs_delete([current_cid])
+                except: pass
             return True
         else:
             logger.error(f"  ❌ [MP上传] 文件移动失败: {move_res}")
