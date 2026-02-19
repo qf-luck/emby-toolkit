@@ -685,6 +685,51 @@ class SmartOrganizer:
         if rule.get('ratings'):
             if self.raw_metadata['rating_label'] not in rule['ratings']: return False
 
+        # 8. 年份 (Year) 
+        year_min = rule.get('year_min')
+        year_max = rule.get('year_max')
+        
+        if year_min or year_max:
+            date_str = self.details.get('release_date') or self.details.get('first_air_date')
+            current_year = 0
+            if date_str and len(date_str) >= 4:
+                try:
+                    current_year = int(date_str[:4])
+                except: pass
+            
+            # 如果获取不到年份，且设置了年份限制，则视为不匹配（严谨策略）
+            if current_year == 0: return False
+            
+            if year_min and current_year < int(year_min): return False
+            if year_max and current_year > int(year_max): return False
+
+        # 9. 时长 (Runtime) 
+        # 逻辑：电影取 runtime，剧集取 episode_run_time (列表取平均或第一个)
+        run_min = rule.get('runtime_min')
+        run_max = rule.get('runtime_max')
+        
+        if run_min or run_max:
+            current_runtime = 0
+            if self.media_type == 'movie':
+                current_runtime = self.details.get('runtime') or 0
+            else:
+                # 剧集时长通常是一个列表 [45, 60]，取第一个作为参考
+                runtimes = self.details.get('episode_run_time', [])
+                if runtimes and len(runtimes) > 0:
+                    current_runtime = runtimes[0]
+            
+            # 如果获取不到时长，且设置了限制，视为不匹配
+            if current_runtime == 0: return False
+            
+            if run_min and current_runtime < int(run_min): return False
+            if run_max and current_runtime > int(run_max): return False
+
+        # 10. 评分 (Min Rating) - 数值比较
+        if rule.get('min_rating') and float(rule['min_rating']) > 0:
+            vote_avg = self.details.get('vote_average', 0)
+            if vote_avg < float(rule['min_rating']):
+                return False
+
         return True
 
     def get_target_cid(self):
@@ -1143,9 +1188,6 @@ class SmartOrganizer:
             return False
 
         # 1. 准备标准名称 (文件夹名)
-        # MP 传过来的 target_diritem.name 通常已经是标准格式 "Title (Year) {tmdb=xxx}"
-        # 但为了保持一致性，我们还是用自己的逻辑算一遍文件夹名，或者直接信赖 MP
-        # 这里我们选择信赖自己的 TMDb 数据生成的标准文件夹名，以防 MP 格式不同
         title = self.details.get('title') or self.original_title
         date_str = self.details.get('date') or ''
         year = date_str[:4] if date_str else ''

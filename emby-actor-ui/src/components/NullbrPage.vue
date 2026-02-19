@@ -156,8 +156,15 @@
                     </n-button>
                   </n-input-group>
                 </n-form-item>
-                <n-form-item label="待整理目录 CID">
-                  <n-input v-model:value="config.p115_save_path_cid" placeholder="0 为根目录" />
+                <n-form-item label="待整理目录">
+                  <n-input-group>
+                    <n-input :value="config.p115_save_path_cid" placeholder="请选择目录" readonly @click="openFolderSelector('config', config.p115_save_path_cid)">
+                      <template #prefix><n-icon :component="FolderIcon" /></template>
+                    </n-input>
+                    <n-button type="primary" ghost @click="openFolderSelector('config', config.p115_save_path_cid)">
+                      选择
+                    </n-button>
+                  </n-input-group>
                 </n-form-item>
               </div>
 
@@ -507,9 +514,20 @@
         <n-form-item label="规则名称">
           <n-input v-model:value="currentRule.name" placeholder="例如：漫威电影宇宙" />
         </n-form-item>
-        <n-form-item label="目标 CID">
-          <n-input v-model:value="currentRule.cid" placeholder="115 文件夹 ID (例如: 12345678)" />
-          <template #feedback>请在 115 网页版进入文件夹，URL 里的数字即为 CID</template>
+        <n-form-item label="目标目录">
+          <n-input-group>
+            <n-input 
+              :value="currentRule.dir_name || currentRule.cid" 
+              readonly 
+              placeholder="点击选择目录" 
+              @click="openFolderSelector('rule', currentRule.cid)"
+            >
+              <template #prefix><n-icon :component="FolderIcon" color="#f0a020" /></template>
+            </n-input>
+            <n-button type="primary" ghost @click="openFolderSelector('rule', currentRule.cid)">
+              选择
+            </n-button>
+          </n-input-group>
         </n-form-item>
         
         <n-divider title-placement="left" style="font-size: 12px; color: #999;">匹配条件 (满足所有勾选条件时命中)</n-divider>
@@ -546,6 +564,32 @@
            <n-select v-model:value="currentRule.ratings" multiple filterable :options="ratingOptions" placeholder="包含任一分级即可 (如: 限制级)" />
         </n-form-item>
 
+        <!-- 年份范围 -->
+        <n-form-item label="年份范围">
+          <n-input-group>
+            <n-input-number v-model:value="currentRule.year_min" :min="1900" :max="2099" placeholder="起始" :show-button="false" style="width: 50%" />
+            <n-input-group-label style="background-color: var(--n-action-color); border: 1px solid var(--n-divider-color); border-left: 0; border-right: 0;">至</n-input-group-label>
+            <n-input-number v-model:value="currentRule.year_max" :min="1900" :max="2099" placeholder="结束" :show-button="false" style="width: 50%" />
+          </n-input-group>
+        </n-form-item>
+
+        <!-- 时长范围 -->
+        <n-form-item label="时长 (分钟)">
+          <n-input-group>
+            <n-input-number v-model:value="currentRule.runtime_min" :min="0" placeholder="0" :show-button="false" style="width: 50%" />
+            <n-input-group-label style="background-color: var(--n-action-color); border: 1px solid var(--n-divider-color); border-left: 0; border-right: 0;">至</n-input-group-label>
+            <n-input-number v-model:value="currentRule.runtime_max" :min="0" placeholder="∞" :show-button="false" style="width: 50%" />
+          </n-input-group>
+          <template #feedback>电影为总时长，剧集为单集时长</template>
+        </n-form-item>
+
+        <n-form-item label="最低评分">
+          <n-input-number v-model:value="currentRule.min_rating" :min="0" :max="10" :step="0.1" placeholder="0" style="width: 100%">
+            <template #suffix>分</template>
+          </n-input-number>
+          <template #feedback>TMDb 评分大于等于此值时命中</template>
+        </n-form-item>
+
       </n-form>
       <template #footer>
         <n-space justify="end">
@@ -580,7 +624,7 @@
                       <n-tag v-if="!rule.enabled" size="tiny" type="error" :bordered="false">已禁用</n-tag>
                     </div>
                     <div class="rule-desc">
-                        <n-tag size="tiny" :bordered="false" type="info">CID: {{ rule.cid }}</n-tag>
+                        <n-tag size="tiny" :bordered="false" type="info">目录: {{ rule.dir_name }}</n-tag>
                         <span style="margin-left: 8px; font-size: 12px; color: #666;">{{ getRuleSummary(rule) }}</span>
                     </div>
                   </div>
@@ -642,6 +686,77 @@
         </n-space>
       </template>
     </n-modal>
+    <!-- D. ★★★ 通用目录选择器 Popover ★★★ -->
+    <!-- 使用 NModal 代替 Popover，因为 Popover 在 Modal 里容易层级混乱，且 Modal 更适合复杂操作 -->
+    <n-modal v-model:show="showFolderPopover" preset="card" title="选择 115 目录" style="width: 450px;" :bordered="false">
+      <div class="folder-browser">
+        <!-- 1. 顶部导航栏 -->
+        <div class="browser-header">
+          <div class="nav-left">
+            <n-button text size="small" @click="load115Folders('0')">
+              <template #icon><n-icon size="18"><HomeIcon /></n-icon></template>
+            </n-button>
+            <n-divider vertical />
+            <div class="breadcrumbs">
+              <span v-if="currentBrowserCid === '0'">根目录</span>
+              <template v-else>
+                <span class="crumb-item" @click="load115Folders('0')">...</span>
+                <span class="separator">/</span>
+                <span class="crumb-item current">{{ currentBrowserFolderName }}</span>
+              </template>
+            </div>
+          </div>
+          <!-- 新建文件夹按钮 -->
+          <n-popover trigger="click" placement="bottom-end" :show="showCreateFolderInput" @update:show="v => showCreateFolderInput = v">
+            <template #trigger>
+              <n-button size="tiny" secondary type="primary">
+                <template #icon><n-icon><AddIcon /></n-icon></template>
+                新建
+              </n-button>
+            </template>
+            <div style="padding: 8px; width: 200px;">
+              <n-input v-model:value="newFolderName" placeholder="文件夹名称" size="small" @keyup.enter="handleCreateFolder" />
+              <n-button block type="primary" size="small" style="margin-top: 8px;" @click="handleCreateFolder">确定</n-button>
+            </div>
+          </n-popover>
+        </div>
+
+        <!-- 2. 文件夹列表 (固定高度 + 滚动条) -->
+        <div class="folder-list-container">
+          <n-spin :show="loadingFolders">
+            <div class="folder-list">
+              <n-empty v-if="folderList.length === 0 && !loadingFolders" description="空文件夹" size="small" style="padding: 40px 0;" />
+              
+              <div 
+                v-for="folder in folderList" 
+                :key="folder.id" 
+                class="folder-item"
+                @click="load115Folders(folder.id, folder.name)"
+              >
+                <div class="folder-icon-wrapper">
+                  <n-icon size="22" color="#ffca28"><FolderIcon /></n-icon>
+                </div>
+                <span class="folder-name">{{ folder.name }}</span>
+                <n-icon size="16" color="#ccc"><ChevronRightIcon /></n-icon>
+              </div>
+            </div>
+          </n-spin>
+        </div>
+
+        <!-- 3. 底部确认栏 -->
+        <div class="browser-footer">
+          <div class="current-info">
+            <span style="color: #666; font-size: 12px;">已选: {{ currentBrowserFolderName }}</span>
+          </div>
+          <n-space>
+            <n-button size="small" @click="showFolderPopover = false">取消</n-button>
+            <n-button type="primary" size="small" @click="confirmFolderSelection">
+              确定选择
+            </n-button>
+          </n-space>
+        </div>
+      </div>
+    </n-modal>
     <!-- 资源选择弹窗 -->
     <NullbrSearchModal ref="nullbrModalRef" />
   </n-layout>
@@ -669,7 +784,11 @@ import {
   Menu as DragHandleIcon, 
   CreateOutline as EditIcon, 
   TrashOutline as DeleteIcon, 
-  Add as AddIcon
+  Add as AddIcon,
+  FolderOpenOutline as FolderOpenIcon,
+  Folder as FolderIcon,
+  HomeOutline as HomeIcon,
+  ChevronForward as ChevronRightIcon
 } from '@vicons/ionicons5';
 import draggable from 'vuedraggable';
 const message = useMessage();
@@ -1022,7 +1141,8 @@ const addRule = () => {
   currentRule.value = { 
     id: Date.now(), name: '', cid: '', enabled: true, 
     media_type: 'all', genres: [], countries: [], languages: [], 
-    studios: [], keywords: [], ratings: []
+    studios: [], keywords: [], ratings: [],
+    year_min: null, year_max: null, runtime_min: null, runtime_max: null, min_rating: 0
   };
   showRuleModal.value = true;
 };
@@ -1108,6 +1228,95 @@ const selectSeasonAndSearch = (season) => {
     
     nullbrModalRef.value.open(searchItem);
   }
+};
+
+// --- 115 目录浏览通用逻辑 ---
+const showFolderPopover = ref(false); // 控制 Popover 显示
+const loadingFolders = ref(false);
+const folderList = ref([]);
+const currentBrowserCid = ref('0');
+const currentBrowserFolderName = ref('根目录');
+const newFolderName = ref(''); // 新建文件夹名称
+const showCreateFolderInput = ref(false); // 控制新建输入框显示
+const selectorContext = ref({ type: '', key: '' });
+
+// 打开选择器
+const openFolderSelector = (type, initialCid = '0') => {
+  selectorContext.value.type = type;
+  showFolderPopover.value = true;
+  // 如果传入了有效的 CID，尝试加载该目录，否则加载根目录
+  const targetCid = (initialCid && initialCid !== '0') ? initialCid : '0';
+  load115Folders(targetCid);
+};
+
+// 打开 Popover 时初始化
+const handleFolderPopoverShow = (show) => {
+  if (show) {
+    // 如果当前输入框有值，尝试加载该值（如果后端支持反查路径最好，不支持就回根目录）
+    // 这里简单起见，每次打开都回根目录，或者停留在上次浏览的位置
+    if (currentBrowserCid.value === '0') {
+        load115Folders('0');
+    }
+  }
+};
+
+// 加载目录 (保持不变，确保 API 路径正确)
+const load115Folders = async (cid, folderName = null) => {
+  loadingFolders.value = true;
+  try {
+    const res = await axios.get('/api/nullbr/115/dirs', { params: { cid } });
+    if (res.data && res.data.success) {
+      folderList.value = res.data.data;
+      currentBrowserCid.value = cid;
+      if (folderName) currentBrowserFolderName.value = folderName;
+      if (cid === '0') currentBrowserFolderName.value = '根目录';
+    }
+  } catch (e) {
+    message.error("加载目录失败: " + (e.response?.data?.message || e.message));
+  } finally {
+    loadingFolders.value = false;
+  }
+};
+
+// 新建文件夹
+const handleCreateFolder = async () => {
+  if (!newFolderName.value) return;
+  try {
+    const res = await axios.post('/api/nullbr/115/mkdir', {
+      pid: currentBrowserCid.value,
+      name: newFolderName.value
+    });
+    if (res.data && res.data.status === 'success') {
+      message.success('创建成功');
+      newFolderName.value = '';
+      showCreateFolderInput.value = false;
+      // 刷新当前列表
+      load115Folders(currentBrowserCid.value, currentBrowserFolderName.value);
+    } else {
+      message.error(res.data.message || '创建失败');
+    }
+  } catch (e) {
+    message.error("请求失败: " + e.message);
+  }
+};
+
+// 确认选择
+const confirmFolderSelection = () => {
+  const cid = currentBrowserCid.value;
+  // 根目录显示 "/"，其他显示文件夹名 (或者你可以拼接完整路径，但 API 没返回完整路径，这里简化显示)
+  const name = cid === '0' ? '/' : currentBrowserFolderName.value; 
+  
+  if (selectorContext.value.type === 'config') {
+    config.p115_save_path_cid = cid;
+    // 可以在 config 里加个临时字段存名字用于显示，或者只存 CID
+    // 这里假设 config 只有 p115_save_path_cid，显示时我们只显示 CID 或 "已选择: Name"
+    message.success(`保存目录已更新为: ${name}`);
+  } else if (selectorContext.value.type === 'rule') {
+    currentRule.value.cid = cid;
+    currentRule.value.dir_name = name;
+  }
+  
+  showFolderPopover.value = false; // ★★★ 自动关闭 ★★★
 };
 
 const MediaCard = defineComponent({
@@ -1462,4 +1671,126 @@ onMounted(async () => {
 .rule-info { flex: 1; }
 .rule-name { font-weight: bold; font-size: 13px; }
 .rule-actions { display: flex; align-items: center; gap: 4px; }
+/* 目录浏览器样式优化 */
+.folder-browser {
+  display: flex;
+  flex-direction: column;
+  height: 500px;
+  /* 使用 Naive UI 变量 */
+  background-color: var(--n-card-color); 
+  color: var(--n-text-color-1);
+  border-radius: 4px;
+  overflow: hidden;
+  border: 1px solid var(--n-divider-color);
+}
+
+.browser-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--n-divider-color);
+  /* 使用稍微深一点/浅一点的背景色变量，或者用 action-color */
+  background-color: var(--n-action-color); 
+  flex-shrink: 0;
+}
+
+.nav-left {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  overflow: hidden;
+}
+
+.breadcrumbs {
+  flex: 1;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-left: 8px;
+  display: flex;
+  align-items: center;
+  color: var(--n-text-color-3);
+}
+.crumb-item { cursor: pointer; transition: color 0.2s; }
+.crumb-item:hover { color: var(--n-primary-color); }
+.crumb-item.current { color: var(--n-text-color-1); font-weight: 600; cursor: default; }
+.separator { margin: 0 6px; color: var(--n-text-color-disabled); }
+
+/* 列表区域 */
+.folder-list-container {
+  flex: 1;
+  overflow-y: auto;
+  position: relative;
+  background-color: transparent;
+}
+
+.folder-list {
+  padding: 4px 0;
+}
+
+.folder-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 16px;
+  cursor: pointer;
+  transition: background-color 0.2s;
+  border-bottom: 1px solid var(--n-divider-color);
+  color: var(--n-text-color-2);
+}
+
+.folder-item:hover {
+  background-color: var(--n-hover-color); /* Naive UI 的悬停色 */
+}
+
+.folder-icon-wrapper {
+  display: flex;
+  align-items: center;
+  margin-right: 12px;
+}
+
+.folder-name {
+  flex: 1;
+  font-size: 14px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 底部栏 */
+.browser-footer {
+  padding: 12px 16px;
+  border-top: 1px solid var(--n-divider-color);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background-color: var(--n-card-color);
+  flex-shrink: 0;
+}
+
+.current-info span {
+    color: var(--n-text-color-3);
+    font-size: 12px;
+}
+
+/* 暗色模式适配 */
+@media (prefers-color-scheme: dark) {
+  .folder-browser, .browser-header, .browser-footer {
+    background: #2c2c2c;
+    border-color: #444;
+  }
+  .folder-item {
+    border-color: #333;
+  }
+  .folder-item:hover {
+    background-color: #3a3a3a;
+  }
+  .folder-name {
+    color: #ddd;
+  }
+  .crumb-item.current {
+    color: #fff;
+  }
+}
 </style>

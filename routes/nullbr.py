@@ -6,6 +6,10 @@ from flask import Blueprint, jsonify, request
 from extensions import admin_required
 from database import settings_db
 import handler.nullbr as nullbr_handler
+try:
+    from p115client import P115Client
+except ImportError:
+    P115Client = None
 
 nullbr_bp = Blueprint('nullbr_bp', __name__, url_prefix='/api/nullbr')
 logger = logging.getLogger(__name__)
@@ -191,3 +195,96 @@ def handle_sorting_rules():
             rules = []
         settings_db.save_setting('nullbr_sorting_rules', rules)
         return jsonify({"status": "success", "message": "整理规则已保存"})
+    
+@nullbr_bp.route('/115/dirs', methods=['GET'])
+@admin_required
+def list_115_directories():
+    """
+    获取 115 目录列表
+    参数: cid (默认为 0)
+    """
+    if P115Client is None:
+        return jsonify({"success": False, "message": "未安装 p115client"}), 500
+        
+    config = nullbr_handler.get_config()
+    cookies = config.get('p115_cookies')
+    if not cookies:
+        return jsonify({"success": False, "message": "未配置 Cookies"}), 400
+
+    try:
+        cid = int(request.args.get('cid', 0))
+    except:
+        cid = 0
+    
+    try:
+        client = P115Client(cookies)
+        
+        # ★★★ 核心修改：添加 nf=1 (只显示文件夹)，limit 设为 1000 ★★★
+        # asc=1: 升序, o='file_name': 按文件名排序
+        resp = client.fs_files({
+            'cid': cid, 
+            'limit': 20, 
+            'asc': 1, 
+            'o': 'file_name',
+            'nf': 1  # <--- 关键：只返回文件夹，忽略文件
+        })
+        
+        if not resp.get('state'):
+            return jsonify({"success": False, "message": resp.get('error_msg', '获取失败')}), 500
+            
+        data = resp.get('data', [])
+        dirs = []
+        
+        for item in data:
+            # 双重保险：虽然加了 nf=1，还是判断一下是否有 fid
+            if not item.get('fid'): 
+                dirs.append({
+                    "id": item.get('cid'),
+                    "name": item.get('n'),
+                    "parent_id": item.get('pid')
+                })
+        
+        # 获取当前目录的路径信息 (用于面包屑)
+        current_name = '根目录'
+        if cid != 0 and resp.get('path'):
+            # path 列表最后一个通常是当前目录
+            current_name = resp.get('path')[-1].get('name', '未知目录')
+                
+        return jsonify({
+            "success": True, 
+            "data": dirs,
+            "current": {
+                "id": str(cid),
+                "name": current_name
+            }
+        })
+        
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)}), 500
+    
+@nullbr_bp.route('/115/mkdir', methods=['POST'])
+@admin_required
+def create_115_directory():
+    data = request.json
+    pid = data.get('pid') or data.get('cid') # 父目录ID
+    name = data.get('name')
+    
+    if not name:
+        return jsonify({"status": "error", "message": "目录名称不能为空"}), 400
+        
+    if P115Client is None:
+        return jsonify({"status": "error", "message": "未安装 p115client"}), 500
+        
+    config = settings_db.get_setting('nullbr_config') or {}
+    cookies = config.get('p115_cookies')
+    
+    try:
+        client = P115Client(cookies)
+        resp = client.fs_mkdir(name, pid)
+        
+        if resp.get('state'):
+            return jsonify({"status": "success", "data": resp})
+        else:
+            return jsonify({"status": "error", "message": resp.get('error_msg', '创建失败')}), 500
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
