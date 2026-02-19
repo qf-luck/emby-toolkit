@@ -36,7 +36,7 @@ class P115Service:
                 try:
                     cls._client = P115Client(cookies)
                     cls._cookies_cache = cookies
-                    logger.info("  ✅ P115Client 实例已(重新)初始化")
+                    logger.debug("  ✅ P115Client 实例已(重新)初始化")
                 except Exception as e:
                     logger.error(f"  ❌ P115Client 初始化失败: {e}")
                     return None

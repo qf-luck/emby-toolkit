@@ -1213,13 +1213,13 @@ def _perform_cms_notify():
     if enable_smart_organize:
         api_url = f"{cms_url}/api/sync/lift_by_token"
         params = {"type": "lift_sync", "token": cms_token}
-        log_msg = "增量同步 (lift_sync)"
+        log_msg = "增量同步"
     else:
         api_url = f"{cms_url}/api/sync/lift_by_token"
         params = {"type": "auto_organize", "token": cms_token}
-        log_msg = "自动整理 (auto_organize)"
+        log_msg = "自动整理"
 
-    logger.info(f"  📣 [CMS] 防抖结束，发送通知: {log_msg} ...")
+    logger.info(f"  📣 [CMS] 防抖结束，开始: {log_msg} ...")
 
     try:
         response = requests.get(api_url, params=params, timeout=10)

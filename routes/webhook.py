@@ -580,13 +580,7 @@ def emby_webhook():
             target_cid = organizer.get_target_cid()
             
             if target_cid:
-                # ★★★ 核心修复：完全信任 MP Payload，不再去 115 查询 ★★★
-                # MP 的 target_item 里已经包含了我们需要的所有信息：
-                # name: 文件名
-                # size: 文件大小 (字节)
-                # fileid: 文件ID
-                
-                logger.info(f"  🚀 [MP上传] 收到通知: {target_item.get('name')} (Size: {target_item.get('size')})")
+                logger.info(f"  🚀 [MP上传] 新文件: {target_item.get('name')} (文件大小: {int(target_item.get('size', 0))/1024/1024:.2f} MB)")
                 
                 # 构造真实的文件对象 (模拟 115 API 返回的结构)
                 real_root_item = {
@@ -603,8 +597,7 @@ def emby_webhook():
                     del real_root_item['fid']
                     real_root_item['cid'] = file_id # 文件夹自己的 ID
 
-                logger.info(f"  🚀 [MP上传] 转交 SmartOrganizer.execute 处理...")
-                
+                # logger.info(f"  🚀 [MP上传] 转交 SmartOrganizer.execute 处理...")
                 # 复用 execute 逻辑
                 success = organizer.execute(real_root_item, target_cid)
                 
