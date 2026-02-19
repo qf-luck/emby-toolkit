@@ -18,11 +18,16 @@ except ImportError:
     P115Client = None
 
 logger = logging.getLogger(__name__)
+
 # --- CMS通知防抖定时器 ---
 _cms_timer = None
 _cms_lock = threading.Lock()
 
-# ★★★ 硬编码配置：Nullbr ★★★
+# 全局 115 限流锁和时间戳 
+_p115_lock = threading.Lock()
+_last_p115_request_time = 0
+
+# 硬编码配置：Nullbr 
 NULLBR_APP_ID = "7DqRtfNX3"
 NULLBR_API_BASE = "https://api.nullbr.com"
 
@@ -36,6 +41,29 @@ _user_level_cache = {
 
 def get_config():
     return settings_db.get_setting('nullbr_config') or {}
+
+def _wait_for_115_rate_limit():
+    """
+    115 API 全局限流器
+    读取配置中的 request_interval，强制睡眠
+    """
+    global _last_p115_request_time
+    
+    # 获取配置的间隔，默认为 5 秒
+    config = get_config()
+    interval = config.get('request_interval', 5)
+    
+    with _p115_lock:
+        current_time = time.time()
+        elapsed = current_time - _last_p115_request_time
+        
+        if elapsed < interval:
+            sleep_time = interval - elapsed
+            logger.debug(f"  ⏳ [115限流] 强制等待 {sleep_time:.2f} 秒 (间隔设置: {interval}s)...")
+            time.sleep(sleep_time)
+        
+        # 更新最后请求时间
+        _last_p115_request_time = time.time()
 
 def _get_headers():
     config = get_config()
@@ -941,6 +969,8 @@ class SmartOrganizer:
         if depth > max_depth: return []
         
         try:
+            # 调用限流函数，确保不会因为递归调用过快而触发 115 的速率限制
+            _wait_for_115_rate_limit()
             # limit 调大一点，防止文件过多漏掉
             res = self.client.fs_files({'cid': cid, 'limit': 2000})
             if res.get('data'):
@@ -1723,6 +1753,9 @@ def task_scan_and_organize_115(processor=None):
 
         # 2. 扫描目录
         logger.info(f"正在扫描目录 CID: {save_cid} ...")
+        # 调用限流函数，确保我们不会因为频繁调用 API 而被 115 临时封禁
+        _wait_for_115_rate_limit() 
+        res = client.fs_files({'cid': save_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
         res = client.fs_files({'cid': save_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
         
         if not res.get('data'):
@@ -1743,10 +1776,12 @@ def task_scan_and_organize_115(processor=None):
             # 3. 初步识别
             tmdb_id, media_type, title = _identify_media_enhanced(name)
             
-            # ★★★ 核心修复：子文件探测纠错 ★★★
+            # 子文件探测纠错 
             # 如果初步识别为电影，但它是一个文件夹，我们需要看一眼里面的文件
             if tmdb_id and is_folder and media_type == 'movie':
                 try:
+                    # 调用限流函数，确保我们不会因为频繁调用 API 而被 115 临时封禁
+                    _wait_for_115_rate_limit()
                     # 读取文件夹内前 10 个文件
                     sub_res = client.fs_files({'cid': item.get('cid'), 'limit': 10})
                     if sub_res.get('data'):
@@ -1770,7 +1805,6 @@ def task_scan_and_organize_115(processor=None):
                     
                     if organizer.execute(item, target_cid):
                         processed_count += 1
-                        time.sleep(1) 
                 except Exception as e:
                     logger.error(f"  ❌ 整理出错: {e}")
             else:

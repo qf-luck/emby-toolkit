@@ -185,6 +185,36 @@
                   </n-gi>
                 </n-grid>
 
+                <!-- 115API请求间隔设置 -->
+                <n-grid :cols="1" style="margin-top: 12px;">
+                  <n-gi>
+                    <n-form-item label="API 请求间隔 (秒)">
+                      <n-input-group>
+                        <n-input-number 
+                          v-model:value="config.request_interval" 
+                          :min="1" 
+                          :step="1" 
+                          placeholder="5" 
+                          style="width: 100%;"
+                        >
+                          <template #suffix>秒</template>
+                        </n-input-number>
+                        <n-tooltip trigger="hover">
+                          <template #trigger>
+                            <n-button type="warning" ghost>
+                              <template #icon><n-icon><AlertIcon /></n-icon></template>
+                              风险提示
+                            </n-button>
+                          </template>
+                          115 官方对 API 调用频率有严格限制 (405错误)。<br>
+                          默认 5 秒是最安全的。<br>
+                          <span style="color: #ff4d4f; font-weight: bold;">谨慎设置</span>
+                        </n-tooltip>
+                      </n-input-group>
+                    </n-form-item>
+                  </n-gi>
+                </n-grid>
+
                 <n-divider style="margin: 12px 0;" />
 
                 <!-- 底部：整理开关与操作按钮 (Flex 布局) -->
@@ -196,7 +226,7 @@
                       <template #unchecked>智能整理: 关闭</template>
                     </n-switch>
                     <n-text depth="3" style="font-size: 12px;" class="hide-on-mobile">
-                      <span v-if="config.enable_smart_organize">系统将自动监控并整理上述目录</span>
+                      <span v-if="config.enable_smart_organize">接管整理，按右边的分类规则入库</span>
                       <span v-else>仅转存，不执行整理</span>
                     </n-text>
                   </div>
@@ -223,7 +253,7 @@
                     <!-- 规则管理按钮 -->
                     <n-button secondary @click="showRuleManagerModal = true">
                       <template #icon><n-icon :component="ListIcon" /></template>
-                      规则 ({{ sortingRules.length }})
+                      分类规则 ({{ sortingRules.length }})
                     </n-button>
                   </n-space>
                 </div>
@@ -829,7 +859,8 @@ import {
   Folder as FolderIcon,
   HomeOutline as HomeIcon,
   ChevronForward as ChevronRightIcon,
-  PlayOutline as RunIcon
+  PlayOutline as RunIcon,
+  AlertCircleOutline as AlertIcon
 } from '@vicons/ionicons5';
 import draggable from 'vuedraggable';
 const message = useMessage();
@@ -842,6 +873,7 @@ const config = reactive({
   p115_cookies: '',
   p115_save_path_cid: '',
   p115_save_path_name: '',
+  request_interval: 5,
   cms_url: '',    
   cms_token: '',
   enabled_sources: ['115', 'magnet', 'ed2k'], 

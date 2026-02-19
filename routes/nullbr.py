@@ -29,14 +29,11 @@ def handle_config():
         if 'enabled_sources' not in config:
             config['enabled_sources'] = ['115', 'magnet', 'ed2k']
         
-        # 清理旧字段
-        config.pop('daily_limit', None)
-        config.pop('request_interval', None)
-        
         if 'p115_cookies' not in config: config['p115_cookies'] = ''
         if 'p115_save_path_cid' not in config: config['p115_save_path_cid'] = 0
         if 'p115_save_path_name' not in config: config['p115_save_path_name'] = '根目录'
         if 'enable_smart_organize' not in config: config['enable_smart_organize'] = False
+        if 'request_interval' not in config: config['request_interval'] = 5
         return jsonify(config)
     
     if request.method == 'POST':
@@ -48,6 +45,7 @@ def handle_config():
             "p115_cookies": data.get('p115_cookies', '').strip(),
             "p115_save_path_cid": data.get('p115_save_path_cid', 0),
             "p115_save_path_name": data.get('p115_save_path_name', '根目录').strip(),
+            "request_interval": int(data.get('request_interval', 5)),
             "filters": data.get('filters', {}),
             "enable_smart_organize": data.get('enable_smart_organize', False),
             "enabled_sources": data.get('enabled_sources', ['115', 'magnet', 'ed2k']),
