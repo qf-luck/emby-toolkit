@@ -735,7 +735,7 @@ class SmartOrganizer:
         for rule in self.rules:
             if not rule.get('enabled', True): continue
             if self._match_rule(rule):
-                logger.info(f"  🎯 [115] 命中规则: {rule.get('name')} -> CID: {rule.get('cid')}")
+                logger.info(f"  🎯 [115] 命中规则: {rule.get('name')} -> 目录: {rule.get('dir_name')}")
                 return rule.get('cid')
         return None
 
@@ -783,10 +783,23 @@ class SmartOrganizer:
             info_tags.append('2160p')
 
         # 4. 编码 (Codec)
-        if re.search(r'[HX]265|HEVC', name_upper): info_tags.append('H265')
+        codec = ""
+        if re.search(r'[HX]265|HEVC', name_upper): info_tags.append('X265')
         elif re.search(r'[HX]264|AVC', name_upper): info_tags.append('H264')
         elif re.search(r'AV1', name_upper): info_tags.append('AV1')
         elif re.search(r'MPEG-?2', name_upper): info_tags.append('MPEG2')
+        # 比特率提取 (Bit Depth) 
+        bit_depth = ""
+        bit_match = re.search(r'(\d{1,2})BIT', name_upper)
+        if bit_match:
+            bit_depth = f"{bit_match.group(1)}bit" # 统一格式为小写 bit
+        
+        # 将编码和比特率组合，比如 "H265 10bit" 或单独 "H265"
+        if codec:
+            full_codec = f"{codec} {bit_depth}".strip()
+            info_tags.append(full_codec)
+        elif bit_depth:
+            info_tags.append(bit_depth)
 
         # 5. 音频 (Audio)
         audio_info = []

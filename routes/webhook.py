@@ -605,7 +605,7 @@ def emby_webhook():
                     # 强制删除 MP 临时目录
                     if current_parent_cid and str(current_parent_cid) != '0':
                         try:
-                            logger.info(f"  🧹 [MP上传] 清理临时目录: {current_parent_cid}")
+                            logger.debug(f"  🧹 [MP上传] 删除临时目录")
                             client.fs_delete([current_parent_cid])
                         except Exception as e:
                             logger.warning(f"  ⚠️ 清理临时目录失败: {e}")
