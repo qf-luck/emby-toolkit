@@ -820,6 +820,10 @@ class SmartOrganizer:
 
         # 5. 音频 (Audio)
         audio_info = []
+        # 识别多音轨标识
+        multi_audio_match = re.search(r'\b(\d+Audio|Multi|双语|多音轨)\b', name_upper, re.I)
+        if multi_audio_match:
+            audio_info.append(multi_audio_match.group(1))
         if re.search(r'ATMOS', name_upper): audio_info.append('Atmos')
         elif re.search(r'TRUEHD', name_upper): audio_info.append('TrueHD')
         elif re.search(r'DTS-?HD(\s?MA)?', name_upper): audio_info.append('DTS-HD')
@@ -836,7 +840,7 @@ class SmartOrganizer:
         if audio_info:
             info_tags.append(" ".join(audio_info))
 
-        # ★★★ 新增：流媒体平台识别 (解决 NF 丢失问题) ★★★
+        # 流媒体平台识别
         # 匹配 NF, AMZN, DSNP, HMAX, HULU, NETFLIX, DISNEY+, APPLETV+
         stream_match = re.search(r'\b(NF|AMZN|DSNP|HMAX|HULU|NETFLIX|DISNEY\+|APPLETV\+|B-GLOBAL)\b', name_upper)
         if stream_match:

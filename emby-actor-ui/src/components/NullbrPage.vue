@@ -144,7 +144,7 @@
                 </div>
 
                 <!-- 中间：双列输入框 (Cookie 和 目录) -->
-                <n-grid :cols="2" :x-gap="12">
+                <n-grid :cols="3" :x-gap="12">
                   <n-gi>
                     <n-form-item label="Cookies" :show-feedback="false">
                       <n-input-group>
@@ -183,10 +183,8 @@
                       </n-input-group>
                     </n-form-item>
                   </n-gi>
-                </n-grid>
 
-                <!-- 115API请求间隔设置 -->
-                <n-grid :cols="1" style="margin-top: 12px;">
+                  <!-- 115API请求间隔设置 -->
                   <n-gi>
                     <n-form-item label="API 请求间隔 (秒)">
                       <n-input-group>
@@ -206,7 +204,7 @@
                               风险提示
                             </n-button>
                           </template>
-                          115 官方对 API 调用频率有严格限制 (405错误)。<br>
+                          115 官方对 API 调用频率有严格限制。<br>
                           默认 5 秒是最安全的。<br>
                           <span style="color: #ff4d4f; font-weight: bold;">谨慎设置</span>
                         </n-tooltip>
@@ -737,7 +735,7 @@
     <!-- 115 Cookie 编辑弹窗 -->
     <n-modal v-model:show="showCookieModal" preset="card" title="配置 115 Cookies" style="width: 600px;">
       <n-alert type="info" :show-icon="true" style="margin-bottom: 16px;">
-        请使用浏览器开发者工具 (F12) 获取 115.com 的 Cookie 信息。
+        建议用不大助手选择不常用设备扫码获取。
         <br>格式通常为: UID=...; CID=...; SEID=...
       </n-alert>
       <n-form-item label="Cookies 内容" :show-feedback="false">
