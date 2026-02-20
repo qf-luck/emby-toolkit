@@ -7,6 +7,7 @@ from extensions import admin_required
 from database import settings_db
 import handler.nullbr as nullbr_handler
 from handler.p115_service import P115Service
+import handler.p115_service
 
 nullbr_bp = Blueprint('nullbr_bp', __name__, url_prefix='/api/nullbr')
 logger = logging.getLogger(__name__)
@@ -153,7 +154,7 @@ def get_list_content():
 @admin_required
 def get_115_status():
     try:
-        info = nullbr_handler.get_115_account_info()
+        info = handler.p115_service.get_115_account_info()
         return jsonify({"status": "success", "data": info})
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500

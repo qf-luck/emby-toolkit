@@ -25,7 +25,7 @@ from .discover import task_update_daily_theme
 from .resubscribe import task_update_resubscribe_cache, task_resubscribe_library
 from .vector_tasks import task_generate_embeddings
 from .system_update import task_check_and_update_container
-import handler.nullbr as nullbr_handler
+from handler.p115_service import task_scan_and_organize_115
 
 logger = logging.getLogger(__name__)
 
@@ -216,7 +216,7 @@ def get_task_registry(context: str = 'all'):
         'manual_subscribe_batch': (task_manual_subscribe_batch, "手动订阅处理", 'media', False),
         'scan_old_seasons_backfill': (task_scan_old_seasons_backfill, "扫描缺季的剧", 'watchlist', False),
         'merge-duplicate-actors': (task_merge_duplicate_actors, "合并分身演员", 'media', False),
-        'scan-organize-115': (nullbr_handler.task_scan_and_organize_115, "扫描115待整理目录", 'media', False),
+        'scan-organize-115': (task_scan_and_organize_115, "扫描115待整理目录", 'media', False),
     }
 
     if context == 'chain':

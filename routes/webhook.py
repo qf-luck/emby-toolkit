@@ -28,8 +28,8 @@ from services.cover_generator import CoverGeneratorService
 from database import custom_collection_db, tmdb_collection_db, settings_db, user_db, maintenance_db, media_db, queries_db, watchlist_db
 from database.log_db import LogDBManager
 from handler.tmdb import get_movie_details, get_tv_details
-from handler.nullbr import SmartOrganizer, get_config, notify_cms_scan
-from handler.p115_service import P115Service
+from handler.nullbr import get_config
+from handler.p115_service import P115Service, SmartOrganizer, notify_cms_scan
 try:
     from p115client import P115Client
 except ImportError:
