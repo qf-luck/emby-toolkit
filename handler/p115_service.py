@@ -946,76 +946,77 @@ def get_115_account_info():
         raise Exception("Cookie 无效或网络不通")
 
 
-def _identify_media_enhanced(filename):
+def _identify_media_enhanced(filename, forced_media_type=None):
     """
     增强识别逻辑：
-    1. 支持多种 TMDb ID 标签格式: {tmdb=xxx}, {tmdb-xxx}, {tmdbid=xxx}, {tmdbid-xxx}
+    1. 支持多种 TMDb ID 标签格式: {tmdb=xxx}
     2. 支持标准命名格式: Title (Year)
-    3. 简单区分 TV/Movie
-
+    3. 接收外部强制指定的类型 (forced_media_type)，不再轮询猜测
+    
     返回: (tmdb_id, media_type, title) 或 (None, None, None)
     """
     tmdb_id = None
-    media_type = 'movie' # 默认为电影
+    media_type = 'movie' # 默认
     title = filename
-
+    
     # 1. 优先提取 TMDb ID 标签 (最稳)
-    # 正则解释: 
-    # \{? : 可选的左大括号
-    # tmdb(?:id)? : 匹配 tmdb 或 tmdbid
-    # [=\-] : 匹配 = 或 -
-    # (\d+) : 捕获数字 ID
-    # \}? : 可选的右大括号
     match_tag = re.search(r'\{?tmdb(?:id)?[=\-](\d+)\}?', filename, re.IGNORECASE)
-
+    
     if match_tag:
         tmdb_id = match_tag.group(1)
-
-        # 简单判断：文件名包含季集信息 -> TV
-        if re.search(r'(?:S\d{1,2}|E\d{1,2}|第\d+季|Season)', filename, re.IGNORECASE):
+        
+        # 如果外部指定了类型，直接用；否则看文件名特征
+        if forced_media_type:
+            media_type = forced_media_type
+        elif re.search(r'(?:S\d{1,2}|E\d{1,2}|第\d+季|Season)', filename, re.IGNORECASE):
             media_type = 'tv'
-
-        # 提取标题 (去掉标签和年份，用于日志显示)
-        # 移除所有可能的标签格式
+        
+        # 提取标题
         clean_name = re.sub(r'\{?tmdb(?:id)?[=\-]\d+\}?', '', filename, flags=re.IGNORECASE).strip()
         match_title = re.match(r'^(.+?)\s*[\(\[]\d{4}[\)\]]', clean_name)
         if match_title:
             title = match_title.group(1).strip()
         else:
             title = clean_name
-
+            
         return tmdb_id, media_type, title
 
-    # 2. 其次提取标准格式 Title (Year) (次稳)
-    # 必须严格匹配 "名称 (20xx)" 这种格式
+    # 2. 其次提取标准格式 Title (Year)
     match_std = re.match(r'^(.+?)\s+[\(\[](\d{4})[\)\]]', filename)
     if match_std:
         name_part = match_std.group(1).strip()
         year_part = match_std.group(2)
-
-        # 简单判断 TV
-        if re.search(r'(?:S\d{1,2}|E\d{1,2}|第\d+季|Season)', filename, re.IGNORECASE):
-            media_type = 'tv'
-
+        
+        # === 关键修正：类型判断逻辑 ===
+        if forced_media_type:
+            # 如果外部透视过目录，确定是 TV，直接信赖
+            media_type = forced_media_type
+        else:
+            # 否则才根据文件名特征判断
+            if re.search(r'(?:S\d{1,2}|E\d{1,2}|第\d+季|Season)', filename, re.IGNORECASE):
+                media_type = 'tv'
+            else:
+                media_type = 'movie'
+            
         # 尝试通过 TMDb API 确认 ID
         try:
             api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
             if api_key:
-                # ★★★ 修正点：使用 tmdb.search_media 通用函数 ★★★
-                # 函数签名: search_media(query, api_key, item_type, year)
+                # 精准搜索，不轮询，不瞎猜
                 results = tmdb.search_media(
-                    query=name_part,
-                    api_key=api_key,
-                    item_type=media_type,
+                    query=name_part, 
+                    api_key=api_key, 
+                    item_type=media_type, 
                     year=year_part
                 )
-
+                
                 if results and len(results) > 0:
                     best = results[0]
                     return best['id'], media_type, (best.get('title') or best.get('name'))
+                else:
+                    logger.warning(f"  ⚠️ TMDb 未找到资源: {name_part} ({year_part}) 类型: {media_type}")
+
         except Exception as e:
-            # 捕获异常防止中断扫描
-            # logger.debug(f"TMDb 搜索失败: {e}")
             pass
 
     return None, None, None
@@ -1053,7 +1054,7 @@ def task_scan_and_organize_115(processor=None):
         save_cid = int(cid_val)
         save_name = str(save_val)
 
-        # 1. 准备 '未识别' 目录 (代码保持不变)
+        # 1. 准备 '未识别' 目录 
         unidentified_folder_name = "未识别"
         unidentified_cid = None
         try:
@@ -1091,34 +1092,32 @@ def task_scan_and_organize_115(processor=None):
             if str(item_id) == str(unidentified_cid) or name == unidentified_folder_name:
                 continue
 
-            # 3. 初步识别
-            tmdb_id, media_type, title = _identify_media_enhanced(name)
-
-            # 子文件探测纠错 
-            # 如果初步识别为电影，但它是一个文件夹，我们需要看一眼里面的文件
-            if tmdb_id and is_folder and media_type == 'movie':
+            forced_type = None
+            if is_folder:
                 try:
-                    # 读取文件夹内前 10 个文件
-                    sub_res = client.fs_files({'cid': item.get('cid'), 'limit': 10})
+                    # 偷看一眼文件夹里面的内容 (取前20个足矣)
+                    sub_res = client.fs_files({'cid': item.get('cid'), 'limit': 20})
                     if sub_res.get('data'):
                         for sub_item in sub_res['data']:
                             sub_name = sub_item.get('n', '')
-                            # 如果子文件名包含 S01E01, EP01, Season 等特征，强制修正为 TV
-                            if re.search(r'(?:S\d{1,2}E\d{1,2}|EP?\d{1,3}|第\d+季|Season)', sub_name, re.IGNORECASE):
-                                media_type = 'tv'
-                                logger.info(f"  🕵️‍♂️ 检测到子文件包含剧集特征 ({sub_name})，类型修正为: 电视剧")
+                            # 只要包含 Season XX, S01, EP01, 第X季，就是电视剧
+                            # 你的截图里是 "Season 01"，这个正则能完美匹配
+                            if re.search(r'(Season\s?\d+|S\d+|Ep?\d+|第\d+季)', sub_name, re.IGNORECASE):
+                                forced_type = 'tv'
+                                logger.info(f"  🕵️‍♂️ [结构探测] 目录 '{name}' 包含子项 '{sub_name}' -> 判定为 TV")
                                 break
                 except Exception as e:
-                    logger.warning(f"  ⚠️ 子目录探测失败: {e}")
+                    logger.warning(f"  ⚠️ 目录透视失败: {e}")
 
+            # 3. 识别 (传入 forced_type)
+            tmdb_id, media_type, title = _identify_media_enhanced(name, forced_media_type=forced_type)
+            
             if tmdb_id:
                 logger.info(f"  ➜ 识别成功: {name} -> ID:{tmdb_id} ({media_type})")
-
                 try:
                     # 4. 归类
                     organizer = SmartOrganizer(client, tmdb_id, media_type, title)
                     target_cid = organizer.get_target_cid()
-
                     if organizer.execute(item, target_cid):
                         processed_count += 1
                 except Exception as e:
