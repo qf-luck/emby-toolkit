@@ -664,19 +664,27 @@
       content-style="display: flex; flex-direction: column; overflow: hidden;" 
     >
       <template #header-extra>
-        <n-tag type="warning" size="small" :bordered="false">拖拽可调整优先级</n-tag>
+        <n-space align="center">
+          <!-- ★★★ 新增：筛选按钮组 ★★★ -->
+          <n-radio-group v-model:value="ruleFilterType" size="small">
+            <n-radio-button value="all">全部</n-radio-button>
+            <n-radio-button value="movie">电影</n-radio-button>
+            <n-radio-button value="tv">剧集</n-radio-button>
+            <n-radio-button value="mixed">混合</n-radio-button>
+          </n-radio-group>
+          <n-divider vertical />
+          <n-tag v-if="ruleFilterType === 'all'" type="warning" size="small" :bordered="false">拖拽可调整优先级</n-tag>
+        </n-space>
       </template>
       
-      <!-- 
-         修改说明：
-         1. 外层 n-modal 增加了 content-style="display: flex; ..." 
-         2. 下面的 div 去掉了 height: 100%，改为 flex: 1，确保占满剩余空间
-      -->
       <div style="display: flex; flex-direction: column; flex: 1; min-height: 0;">
         <!-- 规则列表区域 (可滚动) -->
         <div style="flex: 1; overflow-y: auto; padding-right: 4px; margin-bottom: 16px;">
           <div class="rules-container">
+            
+            <!-- 情况A: 全部模式 (启用拖拽) -->
             <draggable 
+              v-if="ruleFilterType === 'all'"
               v-model="sortingRules" 
               item-key="id" 
               handle=".drag-handle" 
@@ -690,9 +698,13 @@
                     <div style="display: flex; align-items: center; gap: 8px;">
                       <div class="rule-name">{{ rule.name }}</div>
                       <n-tag v-if="!rule.enabled" size="tiny" type="error" :bordered="false">已禁用</n-tag>
+                      <!-- 显示类型标签 -->
+                      <n-tag v-if="rule.media_type === 'movie'" size="tiny" type="info" :bordered="false">电影</n-tag>
+                      <n-tag v-else-if="rule.media_type === 'tv'" size="tiny" type="success" :bordered="false">剧集</n-tag>
+                      <n-tag v-else size="tiny" :bordered="false">混合</n-tag>
                     </div>
                     <div class="rule-desc">
-                        <n-tag size="tiny" :bordered="false" type="info">目录: {{ rule.dir_name }}</n-tag>
+                        <n-tag size="tiny" :bordered="false" type="warning" style="opacity: 0.8;">目录: {{ rule.dir_name }}</n-tag>
                         <span style="margin-left: 8px; font-size: 12px; opacity: 0.7;">{{ getRuleSummary(rule) }}</span>
                     </div>
                   </div>
@@ -718,8 +730,48 @@
                 </div>
               </template>
             </draggable>
+
+            <!-- 情况B: 筛选模式 (禁用拖拽，使用普通列表) -->
+            <div v-else>
+              <div v-for="rule in filteredSortingRules" :key="rule.id" class="rule-item">
+                <!-- 占位符，保持对齐但不可拖拽 -->
+                <div style="width: 24px; margin-right: 12px;"></div> 
+                <div class="rule-info">
+                  <div style="display: flex; align-items: center; gap: 8px;">
+                    <div class="rule-name">{{ rule.name }}</div>
+                    <n-tag v-if="!rule.enabled" size="tiny" type="error" :bordered="false">已禁用</n-tag>
+                    <n-tag v-if="rule.media_type === 'movie'" size="tiny" type="info" :bordered="false">电影</n-tag>
+                    <n-tag v-else-if="rule.media_type === 'tv'" size="tiny" type="success" :bordered="false">剧集</n-tag>
+                    <n-tag v-else size="tiny" :bordered="false">混合</n-tag>
+                  </div>
+                  <div class="rule-desc">
+                      <n-tag size="tiny" :bordered="false" type="warning" style="opacity: 0.8;">目录: {{ rule.dir_name }}</n-tag>
+                      <span style="margin-left: 8px; font-size: 12px; opacity: 0.7;">{{ getRuleSummary(rule) }}</span>
+                  </div>
+                </div>
+                <div class="rule-actions">
+                  <n-switch v-model:value="rule.enabled" size="small" @update:value="saveSortingRules">
+                      <template #checked>开</template>
+                      <template #unchecked>关</template>
+                  </n-switch>
+                  <n-divider vertical />
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button text size="medium" @click="editRule(rule)"><n-icon :component="EditIcon" color="#18a058" /></n-button>
+                    </template>
+                    编辑
+                  </n-tooltip>
+                  <n-tooltip trigger="hover">
+                    <template #trigger>
+                      <n-button text size="medium" @click="deleteRule(rule)"><n-icon :component="DeleteIcon" color="#d03050" /></n-button>
+                    </template>
+                    删除
+                  </n-tooltip>
+                </div>
+              </div>
+            </div>
             
-            <n-empty v-if="sortingRules.length === 0" description="暂无规则，请添加" style="margin: 40px 0;" />
+            <n-empty v-if="filteredSortingRules.length === 0" description="该分类下暂无规则" style="margin: 40px 0;" />
           </div>
         </div>
 
@@ -1156,6 +1208,18 @@ const sortingRules = ref([]);
 const showRuleModal = ref(false);
 const showRuleManagerModal = ref(false);
 const currentRule = ref({});
+const ruleFilterType = ref('all');
+const filteredSortingRules = computed(() => {
+  if (ruleFilterType.value === 'all') {
+    return sortingRules.value;
+  }
+  return sortingRules.value.filter(rule => {
+    if (ruleFilterType.value === 'movie') return rule.media_type === 'movie';
+    if (ruleFilterType.value === 'tv') return rule.media_type === 'tv';
+    if (ruleFilterType.value === 'mixed') return rule.media_type === 'all'; // 混合即“不限”
+    return true;
+  });
+});
 
 // 选项数据
 const rawMovieGenres = ref([]); // 电影类型原始数据

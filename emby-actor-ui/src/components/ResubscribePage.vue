@@ -330,7 +330,7 @@ const filteredItems = computed(() => {
 const getStatusInfo = (status) => {
   switch (status) {
     case 'needed': return { text: '需处理', type: 'warning' };
-    case 'subscribed': return { text: '已提交', type: 'info' };
+    case 'subscribed': return { text: '处理中', type: 'info' };
     case 'ignored': return { text: '已忽略', type: 'tertiary' };
     case 'ok': default: return { text: '已达标', type: 'success' };
   }
