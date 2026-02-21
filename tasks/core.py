@@ -205,6 +205,7 @@ def get_task_registry(context: str = 'all'):
         'restore-cache-from-db': (task_restore_local_cache_from_db, "恢复覆盖缓存", 'media', True),
         'scan-incomplete-assets': (task_scan_incomplete_assets, "检查媒体信息", 'media', True),
         'system-auto-update': (task_check_and_update_container, "系统自动更新", 'media', True),
+        'scan-organize-115': (task_scan_and_organize_115, "网盘文件整理", 'media', True),
         
         # --- 不适合任务链的、需要特定参数的任务 ---
         'add-all-series-to-watchlist': (task_add_all_series_to_watchlist, "一键扫描全库剧集", 'watchlist', False),
@@ -216,7 +217,6 @@ def get_task_registry(context: str = 'all'):
         'manual_subscribe_batch': (task_manual_subscribe_batch, "手动订阅处理", 'media', False),
         'scan_old_seasons_backfill': (task_scan_old_seasons_backfill, "扫描缺季的剧", 'watchlist', False),
         'merge-duplicate-actors': (task_merge_duplicate_actors, "合并分身演员", 'media', False),
-        'scan-organize-115': (task_scan_and_organize_115, "扫描115待整理目录", 'media', False),
     }
 
     if context == 'chain':
