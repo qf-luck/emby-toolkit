@@ -671,7 +671,7 @@ class SmartOrganizer:
                 s_cache_key = f"{final_home_cid}_{s_name}"
                 
                 if s_cache_key in _directory_cid_cache:
-                    logger.info(f"  🔍 季目录缓存命中: {std_root_name} - {s_name}")
+                    logger.info(f"  ⚡ [缓存命中] 季目录: {std_root_name} - {s_name}")
                     real_target_cid = _directory_cid_cache[s_cache_key]
                 else:
                     # 尝试创建季目录
@@ -701,11 +701,15 @@ class SmartOrganizer:
 
             # 4. 一步到位移动到目的地
             if self.client.fs_move(fid, real_target_cid).get('state'):
+                if self.media_type == 'tv' and season_num is not None:
+                    logger.info(f"  📁 [移动] {file_name} -> {std_root_name} - {s_name}")
+                logger.info(f"  📁 [移动] {file_name} -> {std_root_name} (CID: {real_target_cid})")
                 moved_count += 1
 
         # 步骤 D: 清理空目录
         if not is_source_file and moved_count > 0:
             self.client.fs_delete([source_root_id])
+            logger.info(f"  🧹 已清理空目录")
 
         return True
 
