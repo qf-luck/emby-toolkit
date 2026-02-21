@@ -671,7 +671,7 @@ class SmartOrganizer:
                 s_cache_key = f"{final_home_cid}_{s_name}"
                 
                 if s_cache_key in _directory_cid_cache:
-                    logger.info(f"  🔍 季目录 CID 缓存命中: {std_root_name} - {s_name}")
+                    logger.info(f"  🔍 季目录缓存命中: {std_root_name} - {s_name}")
                     real_target_cid = _directory_cid_cache[s_cache_key]
                 else:
                     # 尝试创建季目录
