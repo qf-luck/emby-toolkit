@@ -77,15 +77,7 @@ class P115Service:
         config = settings_db.get_setting('nullbr_config') or {}
         return config.get('p115_cookies')
     
-# 全局目录缓存
-_directory_cid_cache = {}
-MAX_CACHE_SIZE = 1000
-
-def _add_to_cache(key, value):
-    """简单的缓存管理：如果满了，清空数据"""
-    if len(_directory_cid_cache) >= MAX_CACHE_SIZE:
-        _directory_cid_cache.clear()
-    _directory_cid_cache[key] = value
+_directory_cid_cache = {} # 全局目录 CID 缓存，key 格式: f"{parent_cid}_{dir_name}"
 class SmartOrganizer:
     def __init__(self, client, tmdb_id, media_type, original_title):
         self.client = client
@@ -605,56 +597,37 @@ class SmartOrganizer:
             logger.info(f"  ⚡ [缓存命中] 目录 CID: {final_home_cid}")
         
         # 3. 缓存未命中，走 API (乐观锁策略)
-            if not final_home_cid:
-                # 尝试直接创建
-                mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
-                
-                if mk_res.get('state'):
-                    # 创建成功
-                    final_home_cid = mk_res.get('cid')
-                    logger.info(f"  🆕 创建新目录成功: {std_root_name}")
-                    _add_to_cache(cache_key, final_home_cid)
-                    logger.debug(f"  📂 目录 CID 已缓存 (Key: {cache_key})")
-                else:
-                    # 创建失败，回退搜索 (双重保险策略)
-                    try:
-                        # 第一轮：快速搜索 (Limit 50)
-                        search_res = self.client.fs_files({
-                            'cid': dest_parent_cid, 
-                            'search_value': std_root_name, 
-                            'limit': 50, 
-                        })
-                        
-                        found = False
-                        if search_res.get('data'):
-                            for item in search_res['data']:
-                                if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
-                                    final_home_cid = item.get('cid')
-                                    found = True
-                                    break
-                        
-                        # 第二轮：深度搜索 (Limit 1000) - 仅当第一轮失败时触发
-                        if not found:
-                            logger.warning(f"  ⚠️ 快速搜索未找到目录 '{std_root_name}'，尝试深度搜索...")
-                            search_res = self.client.fs_files({
-                                'cid': dest_parent_cid, 
-                                'search_value': std_root_name, 
-                                'limit': 1000, 
-                            })
-                            if search_res.get('data'):
-                                for item in search_res['data']:
-                                    if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
-                                        final_home_cid = item.get('cid')
-                                        found = True
-                                        break
-                        
-                        if found:
-                            logger.info(f"  📂 发现已存在的目录: {std_root_name}")
-                            _add_to_cache(cache_key, final_home_cid)
-                            logger.debug(f"  📂 目录 CID 已缓存 (Key: {cache_key})")
-                            
-                    except Exception as e:
-                        logger.warning(f"  ⚠️ 查找目录异常: {e}")
+        if not final_home_cid:
+            # 尝试直接创建
+            mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
+            
+            if mk_res.get('state'):
+                # 创建成功
+                final_home_cid = mk_res.get('cid')
+                logger.info(f"  🆕 创建新目录成功: {std_root_name}")
+                # ★★★ 写入缓存 ★★★
+                if self.media_type == 'tv': # 只有剧集模式才缓存目录 CID，因为电影模式可能每个文件夹都不一样
+                    _directory_cid_cache[cache_key] = final_home_cid
+                    logger.info(f"  ⚡ [缓存更新] 目录 CID: {final_home_cid}")
+            else:
+                # 创建失败，回退搜索
+                try:
+                    search_res = self.client.fs_files({
+                        'cid': dest_parent_cid, 
+                        'search_value': std_root_name, 
+                        'limit': 1000, 
+                    })
+                    if search_res.get('data'):
+                        for item in search_res['data']:
+                            if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
+                                final_home_cid = item.get('cid')
+                                logger.info(f"  📂 发现已存在的目录: {std_root_name}")
+                                if self.media_type == 'tv': # 只有剧集模式才缓存目录 CID，因为电影模式可能每个文件夹都不一样
+                                    _directory_cid_cache[cache_key] = final_home_cid
+                                    logger.info(f"  ⚡ [缓存更新] 目录 CID: {final_home_cid}")
+                                break
+                except Exception as e:
+                    logger.warning(f"  ⚠️ 查找目录异常: {e}")
 
         # 如果经过创建和查找都拿不到 CID，说明真的出问题了
         if not final_home_cid:
