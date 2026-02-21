@@ -327,24 +327,6 @@
                       </template>
                     </n-form-item>
 
-                    <n-form-item label="网盘媒体库根目录" path="p115_media_root_cid">
-                      <n-input-group>
-                        <n-input 
-                          :value="configModel.p115_media_root_name || configModel.p115_media_root_cid" 
-                          placeholder="选择目录" 
-                          readonly 
-                          @click="openFolderSelector('media_root', configModel.p115_media_root_cid)"
-                        >
-                          <template #prefix><n-icon :component="FolderIcon" /></template>
-                        </n-input>
-                        <n-button type="primary" ghost @click="openFolderSelector('media_root', configModel.p115_media_root_cid)">
-                          选择
-                        </n-button>
-                      </n-input-group>
-                      <template #feedback>
-                        <n-text depth="3" style="font-size:0.8em;">对应 Emby 的媒体库根目录，扫描时将基于此目录。</n-text>
-                      </template>
-                    </n-form-item>
                     <n-form-item label="整理开关" path="p115_enable_organize">
                         <n-switch v-model:value="configModel.p115_enable_organize">
                             <template #checked>开启整理</template>

@@ -48,7 +48,6 @@ CONFIG_SECTION_115 = "115"
 CONFIG_OPTION_115_COOKIES = "p115_cookies"
 CONFIG_OPTION_115_SAVE_PATH_CID = "p115_save_path_cid"
 CONFIG_OPTION_115_SAVE_PATH_NAME = "p115_save_path_name"
-CONFIG_OPTION_115_MEDIA_ROOT_CID = "p115_media_root_cid"       # 网盘媒体库根目录CID
 CONFIG_OPTION_115_MEDIA_ROOT_NAME = "p115_media_root_name"     # 网盘媒体库根目录名称
 CONFIG_OPTION_115_INTERVAL = "p115_request_interval"           # API请求间隔
 CONFIG_OPTION_115_ENABLE_ORGANIZE = "p115_enable_organize"     # 智能整理总开关
