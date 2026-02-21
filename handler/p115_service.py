@@ -627,7 +627,7 @@ class SmartOrganizer:
 
             if final_home_cid and self.media_type == 'tv':
                 _directory_cid_cache[cache_key] = final_home_cid
-                logger.info(f"  ✅ 主目录 CID 已缓存: {final_home_cid} (Key: {cache_key})")
+                logger.info(f"  ✅ 主目录已缓存: {std_root_name}")
 
         if not final_home_cid:
             logger.error(f"  ❌ 无法获取或创建目标目录")
@@ -689,7 +689,7 @@ class SmartOrganizer:
                     
                     if s_cid:
                         _directory_cid_cache[s_cache_key] = s_cid
-                        logger.info(f"  ✅ 季目录 CID 已缓存: {s_cid} (Key: {s_cache_key})")
+                        logger.info(f"  ✅ 季目录已缓存: {std_root_name} - {s_name}")
                         real_target_cid = s_cid
 
             # 3. 先改名
