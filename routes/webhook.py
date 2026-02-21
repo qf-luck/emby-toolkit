@@ -28,8 +28,7 @@ from services.cover_generator import CoverGeneratorService
 from database import custom_collection_db, tmdb_collection_db, settings_db, user_db, maintenance_db, media_db, queries_db, watchlist_db
 from database.log_db import LogDBManager
 from handler.tmdb import get_movie_details, get_tv_details
-from handler.nullbr import get_config
-from handler.p115_service import P115Service, SmartOrganizer, notify_cms_scan
+from handler.p115_service import P115Service, SmartOrganizer, notify_cms_scan, get_config
 try:
     from p115client import P115Client
 except ImportError:
@@ -537,7 +536,7 @@ def emby_webhook():
     if mp_event_type == "transfer.complete":
         # 1. 检查配置是否开启了智能整理
         nb_config = get_config()
-        if not nb_config.get('enable_smart_organize', False):
+        if not nb_config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False):
             logger.debug("  🚫 智能整理未开启，忽略 MP 通知。")
             return jsonify({"status": "ignored_smart_organize_disabled"}), 200
         else:
@@ -605,23 +604,8 @@ def emby_webhook():
                     # 强制删除 MP 临时目录
                     if current_parent_cid and str(current_parent_cid) != '0':
                         try:
-                            # ★★★ 核心修复：检查目录创建时间，防止误删正在上传的剧集目录 ★★★
-                            should_delete = True
-                            
-                            # 获取目录详情以检查 ptime
-                            try:
-                                dir_info = client.fs_files({'cid': current_parent_cid, 'limit': 1})
-                                if media_type == 'tv':
-                                    logger.info(f"  🛡️ [MP上传] 检测到是剧集，跳过立即删除临时目录，交由定时任务处理。")
-                                    should_delete = False
-                                    
-                            except Exception:
-                                pass
-
-                            if should_delete:
-                                logger.debug(f"  🧹 [MP上传] 删除临时目录")
-                                client.fs_delete([current_parent_cid])
-                                
+                            logger.debug(f"  🧹 [MP上传] 删除临时目录")
+                            client.fs_delete([current_parent_cid])
                         except Exception as e:
                             logger.warning(f"  ⚠️ 清理临时目录失败: {e}")
 
