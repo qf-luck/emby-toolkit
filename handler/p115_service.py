@@ -742,7 +742,7 @@ class SmartOrganizer:
                 # 1. 先查全局缓存
                 if s_cache_key in _directory_cid_cache:
                     target_folder_cid = _directory_cid_cache[s_cache_key]
-                    logger.debug(f"  ⚡ [季目录缓存] 命中: {s_name}")
+                    logger.info(f"  ⚡ [季目录缓存] 命中: {s_name} -> CID {target_folder_cid}")
                 else:
                     # 2. 缓存没有，再去创建/查找
                     s_mk = self.client.fs_mkdir(s_name, final_home_cid)
