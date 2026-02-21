@@ -622,7 +622,7 @@ class SmartOrganizer:
             else:
                 # 2. 创建失败（通常是已存在），则执行查找
                 try:
-                    search_res = self.client.fs_files({'cid': dest_parent_cid, 'search_value': std_root_name, 'limit': 32, 'offset': 0, 'cur': 1})
+                    search_res = self.client.fs_files({'cid': dest_parent_cid, 'search_value': std_root_name, 'limit': 7000})
                     if search_res.get('data'):
                         for item in search_res['data']:
                             if item.get('n') == std_root_name and not item.get('fid'):
