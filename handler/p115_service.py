@@ -586,74 +586,99 @@ class SmartOrganizer:
 
         source_root_id = root_item.get('fid') or root_item.get('cid')
         is_source_file = bool(root_item.get('fid'))
-
         dest_parent_cid = target_cid if (target_cid and str(target_cid) != '0') else root_item.get('cid')
 
-        # ★★★ 修改：从全局配置读取扩展名 ★★★
         config = get_config()
         configured_exts = config.get(constants.CONFIG_OPTION_115_EXTENSIONS, [])
-        
-        # 转换为小写集合，提高查找效率
         allowed_exts = set(e.lower() for e in configured_exts)
-        
-        # 定义已知的视频格式（仅用于判断是否需要检查文件大小，不用于筛选文件）
-        # 筛选文件完全依赖 allowed_exts
         known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
-
         MIN_VIDEO_SIZE = 10 * 1024 * 1024
 
         logger.info(f"  🚀 [115] 开始整理: {root_item.get('n')} -> {std_root_name}")
 
         # ==================================================
-        # 步骤 A: 获取或创建目标标准文件夹 (带缓存优化)
+        # 步骤 A: 获取或创建目标路径 (包含季目录逻辑提前)
         # ==================================================
         final_home_cid = None
         
-        # 1. 构建缓存 Key (父目录CID + 目标目录名)
+        # --- 1. 获取主目录 (Series/Movie Folder) ---
         cache_key = f"{dest_parent_cid}-{std_root_name}"
-        
-        # 2. 先查缓存
         if cache_key in _directory_cid_cache:
             final_home_cid = _directory_cid_cache[cache_key]
             logger.info(f"  ⚡ [缓存命中] 目录 CID: {final_home_cid}")
         
-        # 3. 缓存未命中，走 API (乐观锁策略)
         if not final_home_cid:
-            # 尝试直接创建
-            mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
-            
-            if mk_res.get('state'):
-                # 创建成功
-                final_home_cid = mk_res.get('cid')
-                logger.info(f"  🆕 创建新目录成功: {std_root_name}")
-                # ★★★ 写入缓存 ★★★
-                if self.media_type == 'tv': # 只有剧集模式才缓存目录 CID，因为电影模式可能每个文件夹都不一样
-                    _directory_cid_cache[cache_key] = final_home_cid
-                    logger.info(f"  ⚡ [缓存更新] 目录 CID: {final_home_cid}")
-            else:
-                # 创建失败，回退搜索
-                try:
-                    search_res = self.client.fs_files({
-                        'cid': dest_parent_cid, 
-                        'search_value': std_root_name, 
-                        'limit': 1000, 
-                    })
-                    if search_res.get('data'):
-                        for item in search_res['data']:
-                            if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
-                                final_home_cid = item.get('cid')
-                                logger.info(f"  📂 发现已存在的目录: {std_root_name}")
-                                if self.media_type == 'tv': # 只有剧集模式才缓存目录 CID，因为电影模式可能每个文件夹都不一样
-                                    _directory_cid_cache[cache_key] = final_home_cid
-                                    logger.info(f"  ⚡ [缓存更新] 目录 CID: {final_home_cid}")
-                                break
-                except Exception as e:
-                    logger.warning(f"  ⚠️ 查找目录异常: {e}")
+            # 策略：先查找，后创建
+            try:
+                search_res = self.client.fs_files({'cid': dest_parent_cid, 'search_value': std_root_name, 'limit': 1000})
+                if search_res.get('data'):
+                    for item in search_res['data']:
+                        if item.get('n') == std_root_name and (item.get('ico') == 'folder' or not item.get('fid')):
+                            final_home_cid = item.get('cid')
+                            logger.info(f"  📂 发现已存在的目录: {std_root_name}")
+                            break
+            except Exception as e:
+                logger.warning(f"  ⚠️ 查找目录异常: {e}")
 
-        # 如果经过创建和查找都拿不到 CID，说明真的出问题了
+            if not final_home_cid:
+                mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
+                if mk_res.get('state'):
+                    final_home_cid = mk_res.get('cid')
+                    logger.info(f"  🆕 创建新目录成功: {std_root_name}")
+                
+            if final_home_cid and self.media_type == 'tv':
+                _directory_cid_cache[cache_key] = final_home_cid
+                logger.info(f"  ✅ 主目录 CID 已缓存: {final_home_cid}")
+
         if not final_home_cid:
-            logger.error(f"  ❌ 无法获取目标目录 CID (创建失败且查找未果): {std_root_name}")
+            logger.error(f"  ❌ 无法获取目标目录 CID: {std_root_name}")
             return False
+
+        # --- 2. 季目录探测 (仅针对 TV，逻辑提前) ---
+        # 如果是 TV 且源是文件夹，我们先探测里面包含的季号，提前准备好 Season 目录
+        season_map_cids = {} # {season_num: cid}
+        if self.media_type == 'tv' and not is_source_file:
+            # 获取源文件夹下的文件，识别所有可能的季号
+            temp_files = self._scan_files_recursively(source_root_id, max_depth=1)
+            found_seasons = set()
+            for f in temp_files:
+                # 预读文件名解析季号
+                _, s_num = self._rename_file_node(f, safe_title, year=year, is_tv=True)
+                if s_num is not None:
+                    found_seasons.add(s_num)
+            
+            # 批量准备 Season 目录 (先查后创)
+            for s_num in found_seasons:
+                s_name = f"Season {s_num:02d}"
+                s_cache_key = f"{final_home_cid}_{s_name}"
+                
+                # 检查缓存
+                if s_cache_key in _directory_cid_cache:
+                    season_map_cids[s_num] = _directory_cid_cache[s_cache_key]
+                    logger.info(f"  ⚡ [缓存命中] 季目录 CID: {season_map_cids[s_num]} for {s_name}")
+                    continue
+
+                # 先查找
+                s_cid = None
+                s_search = self.client.fs_files({'cid': final_home_cid, 'search_value': s_name, 'limit': 100})
+                if s_search.get('data'):
+                    for item in s_search['data']:
+                        if item.get('n') == s_name and not item.get('fid'):
+                            s_cid = item.get('cid')
+                            logger.info(f"  📂 发现已存在季目录: {s_name}")
+                            break
+                
+                # 后创建
+                if not s_cid:
+                    s_mk = self.client.fs_mkdir(s_name, final_home_cid)
+                    if s_mk.get('state'):
+                        s_cid = s_mk.get('cid')
+                        logger.info(f"  🆕 创建新季目录: {s_name}")
+                
+                if s_cid:
+                    season_map_cids[s_num] = s_cid
+                    _directory_cid_cache[s_cache_key] = s_cid
+                    logger.info(f"  ✅ 季目录 CID 已缓存: {s_cid} for {s_name}")
 
         # ==================================================
         # 步骤 B: 扫描源文件
@@ -671,114 +696,60 @@ class SmartOrganizer:
         # ==================================================
         # 步骤 C: 筛选 -> 重命名 -> 移动
         # ==================================================
-        season_folders_cache = {}
         moved_count = 0
-
         for file_item in candidates:
             time.sleep(random.uniform(0.1, 0.3))
             fid = file_item.get('fid')
             file_name = file_item.get('n', '')
             ext = file_name.split('.')[-1].lower() if '.' in file_name else ''
 
-            # 1. 优先进行垃圾词过滤
-            if self._is_junk_file(file_name):
-                logger.info(f"  🗑️ [过滤] 命中屏蔽词，跳过垃圾文件: {file_name}")
+            if self._is_junk_file(file_name): continue
+            if ext not in allowed_exts: continue
+
+            file_size = _parse_115_size(file_item.get('s') or file_item.get('size'))
+            if ext in known_video_exts and 0 < file_size < MIN_VIDEO_SIZE:
                 continue
 
-            # 2. 扩展名白名单检查 
-            if ext not in allowed_exts:
-                # logger.debug(f"  🙈 [忽略] 扩展名不在白名单: {ext}")
-                continue
-
-            # 3. 大小解析
-            raw_size = file_item.get('s')
-            if raw_size is None: raw_size = file_item.get('size')
-            file_size = _parse_115_size(raw_size)
-
-            # 判断是否为视频（用于大小检查逻辑）
-            is_video_type = ext in known_video_exts
-
-            # 4. 过滤小样 (仅针对视频文件)
-            if is_video_type:
-                if 0 < file_size < MIN_VIDEO_SIZE:
-                    logger.info(f"  🗑️ [过滤] 跳过小视频 (Size): {file_name}")
-                    continue
-                elif file_size == 0:
-                    logger.debug(f"  ⚠️ [注意] 文件大小解析为0，强制保留: {file_name}")
-
-            # 5. 计算新文件名
-            new_filename = file_name
-            season_num = None
-
+            # 5. 计算新文件名与季号
             try:
                 new_filename, season_num = self._rename_file_node(
-                    file_item,
-                    safe_title,       
-                    year=year,        
-                    is_tv=(self.media_type=='tv')
+                    file_item, safe_title, year=year, is_tv=(self.media_type=='tv')
                 )
             except Exception as e:
                 logger.error(f"  ❌ 重命名计算出错: {e}")
                 new_filename = file_name
+                season_num = None
 
-            # 6. 执行重命名 (在源位置)
+            # 6. 执行重命名
             if new_filename != file_name:
                 rename_res = self.client.fs_rename((fid, new_filename))
                 if rename_res.get('state'):
                     logger.info(f"  ✏️ [重命名] {file_name} -> {new_filename}")
                 else:
-                    logger.warning(f"  ⚠️ 重命名失败: {file_name}")
                     new_filename = file_name
 
-            # 7. 确定移动的目标文件夹
+            # 7. 确定移动的目标文件夹 (使用步骤 A 准备好的 season_map_cids)
             target_folder_cid = final_home_cid
-
-            # 只有剧集且成功解析出季号时，才放入 Season 文件夹
             if self.media_type == 'tv' and season_num is not None:
-                s_name = f"Season {season_num:02d}"
-                # 构建全局唯一的缓存 Key：父目录CID_季目录名
-                s_cache_key = f"{final_home_cid}_{s_name}"
-                
-                # 1. 先查全局缓存
-                if s_cache_key in _directory_cid_cache:
-                    target_folder_cid = _directory_cid_cache[s_cache_key]
-                    logger.info(f"  ⚡ [季目录缓存] 命中: {s_name} -> CID {target_folder_cid}")
-                else:
-                    # 2. 缓存没有，再去创建/查找
+                # 如果步骤 A 没准备好（例如单文件整理），则临时查/创
+                target_folder_cid = season_map_cids.get(season_num)
+                if not target_folder_cid:
+                    # 此处作为兜底逻辑
+                    s_name = f"Season {season_num:02d}"
                     s_mk = self.client.fs_mkdir(s_name, final_home_cid)
-                    if s_mk.get('state'):
-                        s_cid = s_mk.get('cid')
-                        _directory_cid_cache[s_cache_key] = s_cid
-                        logger.info(f"  ⚡ 季目录缓存更新: {s_name} -> CID {s_cid}")
-                        target_folder_cid = s_cid
-                    else:
-                        # 创建失败（可能已存在），回退查找
-                        s_search = self.client.fs_files({'cid': final_home_cid, 'search_value': s_name, 'limit': 10})
-                        if s_search.get('data'):
-                            for item in s_search['data']:
-                                if item.get('n') == s_name and not item.get('fid'):
-                                    s_cid = item.get('cid')
-                                    _directory_cid_cache[s_cache_key] = s_cid
-                                    logger.info(f"  ⚡ 季目录缓存更新: {s_name} -> CID {s_cid}")
-                                    target_folder_cid = s_cid
-                                    break
+                    target_folder_cid = s_mk.get('cid') if s_mk.get('state') else final_home_cid
 
             # 8. 执行移动
             move_res = self.client.fs_move(fid, target_folder_cid)
             if move_res.get('state'):
                 moved_count += 1
-            else:
-                logger.error(f"  ❌ 移动文件失败: {new_filename}")
 
         # ==================================================
         # 步骤 D: 销毁源目录
         # ==================================================
-        if not is_source_file:
-            if moved_count > 0:
-                logger.info(f"  🧹 [清理] 删除源目录: {root_item.get('n')}")
-                self.client.fs_delete([source_root_id])
-            else:
-                logger.warning("  ⚠️ 未移动任何有效文件，保留源目录以防数据丢失。")
+        if not is_source_file and moved_count > 0:
+            logger.info(f"  🧹 [清理] 删除源目录: {root_item.get('n')}")
+            self.client.fs_delete([source_root_id])
 
         logger.info(f"  ✅ [整理] 完成。共迁移 {moved_count} 个文件。")
         return True
