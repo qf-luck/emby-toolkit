@@ -763,9 +763,6 @@ class SmartOrganizer:
                                     target_folder_cid = s_cid
                                     break
 
-                if season_folders_cache.get(season_num):
-                    target_folder_cid = season_folders_cache[season_num]
-
             # 8. 执行移动
             move_res = self.client.fs_move(fid, target_folder_cid)
             if move_res.get('state'):
@@ -869,7 +866,7 @@ def notify_cms_scan():
         # 如果已有计时器在运行，取消它 (说明1分钟内又有新入库)
         if _cms_timer is not None:
             _cms_timer.cancel()
-            logger.debug("  ⏳ 检测到连续入库，重置 CMS 通知计时器 (60s)")
+            logger.info("  ⏳ 检测到连续入库，重置 CMS 通知计时器 (60s)")
         else:
             logger.info("  ⏳ 启动 CMS 通知计时器，等待 60s 无新入库后发送...")
 
