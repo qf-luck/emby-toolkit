@@ -703,7 +703,7 @@ class SmartOrganizer:
             if self.client.fs_move(fid, real_target_cid).get('state'):
                 if self.media_type == 'tv' and season_num is not None:
                     logger.info(f"  📁 [移动] {file_name} -> {std_root_name} - {s_name}")
-                logger.info(f"  📁 [移动] {file_name} -> {std_root_name} (CID: {real_target_cid})")
+                logger.info(f"  📁 [移动] {file_name} -> {std_root_name}")
                 moved_count += 1
 
         # 步骤 D: 清理空目录
