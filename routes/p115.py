@@ -187,7 +187,7 @@ def _get_cached_115_url(pick_code, user_agent, client_ip=None):
             # 增加一个小随机延迟，模拟人为行为
             time.sleep(0.1) 
             url_obj = client.download_url(pick_code, user_agent=user_agent)
-            logger.info(f"  🎬 [115 API] 获取直链成功: {url_obj}")
+            logger.info(f"  🎬 [115 API] 获取直链成功: {url_obj.name}")
             return str(url_obj) if url_obj else None
         except Exception as e:
             logger.error(f"  ❌ 获取 115 直链 API 报错: {e}")
