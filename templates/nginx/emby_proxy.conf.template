@@ -35,26 +35,8 @@ server {
     # ★★★ 规则 1：【条件化】转发所有视频流请求 ★★★
     # 如果设置了 REDIRECT_UPSTREAM，此规则块将生效。
     # 它会捕获所有主流视频格式、转码流和 .strm 文件，并因为位置靠前而被优先匹配。
-    # ★★★ 修正版：处理 302 视频流转发 ★★★
     {% if REDIRECT_UPSTREAM %}
     location ~* (\.strm$|\.(mkv|mp4|ts|avi|iso|mov|webm|flv)$|/videos/.*stream) {
-        # 1. 必须透传 User-Agent，115 校验直链时 UA 必须与申请时一致
-        proxy_set_header User-Agent $http_user_agent;
-        
-        # 2. 必须透传 Range 头，否则播放器无法拖动进度条，甚至无法开始播放
-        proxy_set_header Range $http_range;
-        
-        # 3. 增加跨域支持 (CORS) - 这是解决“没有兼容的流”的关键
-        # 允许浏览器在收到 302 后有权访问 115 的域名
-        add_header 'Access-Control-Allow-Origin' '*' always;
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, OPTIONS' always;
-        add_header 'Access-Control-Allow-Headers' 'Range, User-Agent, Content-Type, X-Emby-Authorization' always;
-        add_header 'Access-Control-Expose-Headers' 'Content-Length, Content-Range' always;
-
-        # 4. 阻止 Nginx 修改 Location 响应头
-        proxy_redirect off;
-        proxy_intercept_errors off;
-
         proxy_pass http://redirect_service;
     }
     {% endif %}
