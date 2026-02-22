@@ -3,6 +3,7 @@ import logging
 from flask import redirect
 import json
 import os
+import re
 import time
 from flask import Blueprint, jsonify, request, redirect
 from extensions import admin_required
@@ -180,8 +181,10 @@ def play_115_video(pick_code):
     
 @p115_bp.route('/fix_strm', methods=['POST'])
 @admin_required
+@p115_bp.route('/fix_strm', methods=['POST'])
+@admin_required
 def fix_strm_files():
-    """扫描并修正本地所有 .strm 文件的内部链接"""
+    """扫描并修正本地所有 .strm 文件的内部链接 (支持兼容 CMS 老格式)"""
     config = get_config()
     local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
     etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "").rstrip('/')
@@ -192,6 +195,8 @@ def fix_strm_files():
         return jsonify({"success": False, "message": "未配置 ETK 内部访问地址！"}), 400
         
     fixed_count = 0
+    skipped_count = 0
+    
     try:
         # 递归遍历整个本地 STRM 目录
         for root_dir, _, files in os.walk(local_root):
@@ -202,23 +207,56 @@ def fix_strm_files():
                         with open(file_path, 'r', encoding='utf-8') as f:
                             content = f.read().strip()
                         
-                        # 兼容提取旧版的 pick_code
                         pick_code = None
+                        
+                        # ----------------------------------------------------
+                        # ★ 核心升级：多模式兼容提取 pick_code
+                        # ----------------------------------------------------
+                        
+                        # 模式 1: ETK 现在的标准格式
+                        # 例: http://192.168.31.177:5257/api/p115/play/abc1234
                         if '/api/p115/play/' in content:
                             pick_code = content.split('/api/p115/play/')[-1].split('?')[0].strip()
+                            
+                        # 模式 2: ETK 之前测试用的假协议格式
+                        # 例: etk_direct_play://abc1234/文件名.mkv
                         elif content.startswith('etk_direct_play://'):
                             pick_code = content.split('//')[1].split('/')[0].strip()
                             
+                        # 模式 3: CMS 生成的经典格式 (神级兼容)
+                        # 例: http://192.168.31.177:9527/d/dh4jkd6lmhye6x5l5.mkv?/文件名.mkv
+                        # 解析逻辑：找到 "/d/" 后面的内容，截取到第一个 "." 之前
+                        elif '/d/' in content and '?' in content:
+                            # 提取 /d/ 和 . 之间的那段纯字母数字
+                            match = re.search(r'/d/([a-zA-Z0-9]+)\.', content)
+                            if match:
+                                pick_code = match.group(1)
+                                
+                        # ----------------------------------------------------
+                            
                         if pick_code:
-                            # 替换为当前最新的 etk_url
+                            # 拼接为当前最新的 etk_url 格式
                             new_content = f"{etk_url}/api/p115/play/{pick_code}"
+                            
+                            # 只有当内容确实发生变化时才执行写入
                             if content != new_content:
                                 with open(file_path, 'w', encoding='utf-8') as f:
                                     f.write(new_content)
                                 fixed_count += 1
+                            else:
+                                skipped_count += 1
+                        else:
+                            logger.warning(f"  ⚠️ 无法识别该 strm 格式，已跳过: {file_path}")
+                            
                     except Exception as e:
                         logger.error(f"  ❌ 处理文件 {file_path} 失败: {e}")
         
-        return jsonify({"success": True, "message": f"洗刷完毕！成功扫描并修正了 {fixed_count} 个 .strm 文件的链接。"})
+        msg = f"洗刷完毕！成功修正了 {fixed_count} 个文件"
+        if skipped_count > 0:
+            msg += f" (已跳过 {skipped_count} 个无需修改的文件)"
+        logger.info(f"  🧹 [转换完毕] {msg}")
+        return jsonify({"success": True, "message": msg})
+        
     except Exception as e:
+        logger.error(f"  ❌ 批量修正异常: {e}", exc_info=True)
         return jsonify({"success": False, "message": str(e)}), 500

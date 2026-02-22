@@ -838,20 +838,40 @@ class SmartOrganizer:
                         os.makedirs(local_dir, exist_ok=True) # 自动创建本地文件夹结构
 
                         # 3. 构造 strm 文件名和直链内容
-                        strm_filename = os.path.splitext(new_filename)[0] + ".strm"
-                        strm_filepath = os.path.join(local_dir, strm_filename)
-                        
-                        # 写入标准的内网 ETK 链接
-                        strm_content = f"{etk_url}/api/p115/play/{pick_code}"
-                        
-                        # 4. 写入硬盘
-                        with open(strm_filepath, 'w', encoding='utf-8') as f:
-                            f.write(strm_content)
+                        ext = new_filename.split('.')[-1].lower() if '.' in new_filename else ''
+                        is_video = ext in known_video_exts
+                        is_sub = ext in ['srt', 'ass', 'ssa', 'sub', 'vtt', 'sup']
+
+                        if is_video:
+                            # 处理视频 -> 生成 1KB 的 .strm 文件
+                            strm_filename = os.path.splitext(new_filename)[0] + ".strm"
+                            strm_filepath = os.path.join(local_dir, strm_filename)
+                            strm_content = f"{etk_url}/api/p115/play/{pick_code}"
                             
-                        logger.info(f"  📝 [STRM生成] 已镜像网盘层级并生成文件: {strm_filepath}")
-                        
-                        # ★ 进阶福利：如果是字幕文件 (.ass / .srt)，我们其实也可以直接把它下到本地！
-                        # （Emby 挂载本地字幕体验最好，这部分以后你要加的话，老六再给你写代码）
+                            with open(strm_filepath, 'w', encoding='utf-8') as f:
+                                f.write(strm_content)
+                            logger.info(f"  📝 [STRM生成] 已生成视频直链: {strm_filename}")
+                            
+                        elif is_sub:
+                            # 处理字幕 -> 真实下载到本地供 Emby 挂载
+                            sub_filepath = os.path.join(local_dir, new_filename)
+                            if not os.path.exists(sub_filepath):
+                                try:
+                                    logger.info(f"  ⬇️ [字幕下载] 正在向 115 拉取外挂字幕: {new_filename} ...")
+                                    # 索取直链
+                                    url_obj = self.client.download_url(pick_code, user_agent="Mozilla/5.0")
+                                    dl_url = str(url_obj)
+                                    if dl_url:
+                                        # 使用 requests 串流下载文件
+                                        import requests
+                                        resp = requests.get(dl_url, stream=True, timeout=30)
+                                        resp.raise_for_status()
+                                        with open(sub_filepath, 'wb') as f:
+                                            for chunk in resp.iter_content(chunk_size=8192):
+                                                f.write(chunk)
+                                        logger.info(f"  ✅ [字幕下载] 下载完成！")
+                                except Exception as e:
+                                    logger.error(f"  ❌ 下载字幕失败: {e}")
                         
                     except Exception as e:
                         logger.error(f"  ❌ 生成 STRM 文件失败: {e}", exc_info=True)
@@ -1220,3 +1240,131 @@ def task_sync_115_directory_tree(processor=None):
                 break # 发生异常，跳过这个 CID 继续查下一个
 
     update_progress(100, f"=== 同步结束！共成功更新 {total_cached} 个目录的缓存 ===")
+
+def task_full_sync_strm_and_subs(processor=None):
+    """
+    [任务链] 深度遍历 115 目标分类目录，全量生成 .strm 并下载字幕
+    """
+    logger.info("=== 🚀 开始全量生成 STRM 与 同步字幕 ===")
+    
+    try:
+        import task_manager
+    except ImportError:
+        task_manager = None
+
+    def update_progress(prog, msg):
+        if task_manager: task_manager.update_status_from_thread(prog, msg)
+        logger.info(msg)
+
+    config = get_config()
+    local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
+    etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "").rstrip('/')
+    media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
+    allowed_exts = set(e.lower() for e in config.get(constants.CONFIG_OPTION_115_EXTENSIONS, []))
+    known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
+    known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
+    
+    if not local_root or not etk_url:
+        update_progress(100, "错误：未配置本地 STRM 根目录或 ETK 访问地址！")
+        return
+
+    client = P115Service.get_client()
+    if not client: return
+
+    raw_rules = settings_db.get_setting(constants.DB_KEY_115_SORTING_RULES)
+    if not raw_rules: return
+    rules = json.loads(raw_rules) if isinstance(raw_rules, str) else raw_rules
+    
+    # 提取启用的目录
+    target_cids = list(set(str(r['cid']) for r in rules if r.get('enabled', True) and r.get('cid') and str(r['cid']) != '0'))
+    total_cids = len(target_cids)
+
+    # 1. 预先计算分类相对路径
+    category_path_map = {}
+    for cid in target_cids:
+        try:
+            dir_info = client.fs_files({'cid': cid, 'limit': 1})
+            path_nodes = dir_info.get('path', [])
+            start_idx = 1 if media_root_cid == '0' else next((i + 1 for i, n in enumerate(path_nodes) if str(n.get('cid')) == media_root_cid), 0)
+            
+            if start_idx > 0 and start_idx < len(path_nodes):
+                rel_segments = [str(n.get('name')).strip() for n in path_nodes[start_idx:]]
+                category_path_map[cid] = os.path.join(*rel_segments)
+            else:
+                category_path_map[cid] = next((r.get('dir_name') for r in rules if str(r.get('cid')) == cid), "未识别")
+        except:
+            category_path_map[cid] = "未识别"
+
+    # 2. 开始广度优先遍历 (BFS) 扫描文件
+    for idx, base_cid in enumerate(target_cids):
+        base_prog = int((idx / total_cids) * 100)
+        rel_path = category_path_map.get(base_cid, "未识别")
+        base_local_dir = os.path.join(local_root, rel_path)
+        
+        update_progress(base_prog, f"正在深度扫描分类: {rel_path} ...")
+        
+        queue = [(base_cid, base_local_dir)]
+        
+        while queue:
+            if processor and getattr(processor, 'is_stop_requested', lambda: False)():
+                update_progress(100, "任务已被用户手动终止。")
+                return
+                
+            current_cid, current_local_path = queue.pop(0)
+            os.makedirs(current_local_path, exist_ok=True)
+            
+            offset = 0
+            limit = 1000
+            while True:
+                try:
+                    res = client.fs_files({'cid': current_cid, 'limit': limit, 'offset': offset})
+                    data = res.get('data', [])
+                    if not data: break
+                    
+                    for item in data:
+                        name = item.get('n', '')
+                        # 如果是文件夹，加入队列继续钻
+                        if not item.get('fid'):
+                            queue.append((str(item.get('cid')), os.path.join(current_local_path, name)))
+                        else:
+                            # 是文件！处理之
+                            ext = name.split('.')[-1].lower() if '.' in name else ''
+                            if ext not in allowed_exts: continue
+                            
+                            pc = item.get('pc') or item.get('pick_code')
+                            if not pc: continue
+                            
+                            if ext in known_video_exts:
+                                strm_name = os.path.splitext(name)[0] + ".strm"
+                                strm_path = os.path.join(current_local_path, strm_name)
+                                content = f"{etk_url}/api/p115/play/{pc}"
+                                
+                                need_write = True
+                                if os.path.exists(strm_path):
+                                    with open(strm_path, 'r', encoding='utf-8') as f:
+                                        if f.read().strip() == content: need_write = False
+                                        
+                                if need_write:
+                                    with open(strm_path, 'w', encoding='utf-8') as f: f.write(content)
+                                    
+                            elif ext in known_sub_exts:
+                                sub_path = os.path.join(current_local_path, name)
+                                if not os.path.exists(sub_path):
+                                    import requests
+                                    url_obj = client.download_url(pc, user_agent="Mozilla/5.0")
+                                    dl_url = str(url_obj)
+                                    if dl_url:
+                                        resp = requests.get(dl_url, stream=True, timeout=15)
+                                        resp.raise_for_status()
+                                        with open(sub_path, 'wb') as f:
+                                            for chunk in resp.iter_content(8192): f.write(chunk)
+                                        logger.debug(f"已补齐字幕: {name}")
+
+                    if len(data) < limit: break
+                    offset += limit
+                    time.sleep(0.5)
+                except Exception as e:
+                    logger.error(f"遍历目录 CID:{current_cid} 出错: {e}")
+                    break
+
+    update_progress(100, "=== 全量 STRM 与字幕同步完美结束 ===")
