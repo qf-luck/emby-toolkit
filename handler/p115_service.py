@@ -792,10 +792,13 @@ class SmartOrganizer:
                         if not category_name: category_name = "未识别"
 
                         # 2. 拼接本地绝对路径
+                        top_folder = "电视剧" if self.media_type == 'tv' else "电影"
+
+                        # 2. 拼接本地绝对路径 (现在变成了: /strm根目录/电视剧/华语剧/剧集名/Season 01)
                         if self.media_type == 'tv' and season_num is not None:
-                            local_dir = os.path.join(local_root, category_name, std_root_name, s_name)
+                            local_dir = os.path.join(local_root, top_folder, category_name, std_root_name, s_name)
                         else:
-                            local_dir = os.path.join(local_root, category_name, std_root_name)
+                            local_dir = os.path.join(local_root, top_folder, category_name, std_root_name)
                         
                         os.makedirs(local_dir, exist_ok=True) # 自动创建本地文件夹结构
 

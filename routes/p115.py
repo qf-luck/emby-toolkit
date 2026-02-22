@@ -140,18 +140,33 @@ def handle_sorting_rules():
     
 @p115_bp.route('/play/<pick_code>', methods=['GET'])
 def play_115_video(pick_code):
+    """
+    终极黑魔法：115 极速 302 直链解析服务 (已修复 API 格式)
+    """
     client = P115Service.get_client()
-    ua = request.headers.get('User-Agent') # 这里的 UA 必须由 Nginx 传过来
-    
+    if not client:
+        return "115 Client Not Initialized", 500
+        
     try:
-        # 显式传递 ua 参数
-        url_info = client.download_url(pick_code, user_agent=ua)
-        real_url = str(url_info)
+        # 获取播放器(如Emby/Infuse)发起请求时的真实 User-Agent
+        # 这一步非常重要，因为 115 官方会校验获取直链的 UA 和实际拉流的 UA 是否一致！
+        player_ua = request.headers.get('User-Agent', 'Mozilla/5.0')
         
-        # 日志记录 UA 的前 20 位，方便排查 Nginx 是否传对了
-        logger.info(f"  🎬 转发成功 | UA: {ua[:20]}... | URL: {real_url[:30]}...")
+        # ★ 修复 2：调用最新的 download_url 接口，并传入播放器的 UA
+        url_obj = client.download_url(pick_code, user_agent=player_ua)
         
+        # p115client 返回的 url_obj 是一个 P115URL 类（字符串的子类），直接转成 str 就是真实链接
+        real_url = str(url_obj)
+        
+        if not real_url:
+            logger.error(f"  ❌ 无法获取直链，pick_code: {pick_code} (返回为空)")
+            return "Cannot get video stream from 115", 404
+            
+        logger.info(f"  🎬 [直链解析成功] 已拦截点播请求，正在 302 跳转至 115 CDN...")
+        
+        # HTTP 302 临时重定向，让 Emby/播放器 拿着直链自己去拉流
         return redirect(real_url, code=302)
+        
     except Exception as e:
-        logger.error(f"  ❌ 解析失败: {e}")
+        logger.error(f"  ❌ 直链解析发生异常: {e}")
         return str(e), 500
