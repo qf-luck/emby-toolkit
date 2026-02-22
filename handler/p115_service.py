@@ -643,7 +643,7 @@ class SmartOrganizer:
         final_home_cid = P115CacheManager.get_cid(dest_parent_cid, std_root_name)
 
         if final_home_cid:
-            logger.info(f"  ⚡ [DB缓存命中] 主目录: {std_root_name}")
+            logger.info(f"  ⚡ [缓存命中] 主目录: {std_root_name}")
         else:
             # 1. 缓存没命中，直接尝试创建
             mk_res = self.client.fs_mkdir(std_root_name, dest_parent_cid)
