@@ -210,7 +210,7 @@ def play_115_video(pick_code):
         if not real_url:
             # 如果解析太快被拦截了，给播放器返回 429 告知稍后再试
             return "Too Many Requests - 115 API Protection", 429
-            
+        logger.debug(f"  🚀 115 直链已获取: {pick_code}")
         return redirect(real_url, code=302)
         
     except Exception as e:
