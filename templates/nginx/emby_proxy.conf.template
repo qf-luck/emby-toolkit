@@ -31,7 +31,6 @@ server {
     proxy_set_header If-Range $http_if_range;
     # 核心：透传所有客户端 Header
     proxy_pass_request_headers on;
-    proxy_read_timeout 60s;
 
     # ====================================================================
     #  核心路由规则 (V4)
@@ -86,9 +85,5 @@ server {
     # 兜底规则：转发所有其他请求到真实 Emby
     location / {
         proxy_pass http://emby_server;
-        # 确保这里也有 Header 透传
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 }

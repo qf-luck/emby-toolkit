@@ -825,35 +825,24 @@ def proxy_all(path):
                                     logger.info(f"  🎬 [反代劫持] 成功拦截 Emby 流请求，下发 115 CDN 直链！")
                                     from flask import redirect
                                     
-                                    # 如果是 PlaybackInfo 请求，返回给客户端的 Path 应该是原始的 strm 地址或者再次经过我们代理的地址
+                                    # 如果是 PlaybackInfo 请求 (客户端起播前的嗅探)，需要特殊伪装
                                     if 'PlaybackInfo' in full_path:
-                                        fake_info = {
-                                            "MediaSources": [{
-                                                "Id": item_id,
-                                                "Path": real_url,
-                                                "Protocol": "Http",
-                                                "IsInfiniteStream": False,
-                                                "SupportsDirectPlay": True,
-                                                "SupportsDirectStream": True,
-                                                "SupportsTranscoding": False,
-                                                "Container": "mp4",
-                                                "ReadAtNativeFramerate": False,
-                                                "Type": "Default",
-                                                "IsRemote": True,  # 新增：明确告知客户端这是远程流
-                                            }],
-                                            "PlaySessionId": f"etk_proxy_{int(time.time())}"
-                                        }
-                                        json_data = json.dumps(fake_info)
-                                        # 使用 Response 显式返回，并清理掉可能导致 500 的异常 Header
-                                        return Response(
-                                            json_data,
-                                            status=200,
-                                            mimetype='application/json',
-                                            headers={
-                                                'Access-Control-Allow-Origin': '*', # 解决部分客户端跨域
-                                                'Content-Length': str(len(json_data.encode('utf-8'))) # 确保按字节长度计算
-                                            }
-                                        )
+                                         # 骗过 Emby 客户端，告诉它这是一个外部直接播放流
+                                         fake_info = {
+                                             "MediaSources": [{
+                                                 "Id": item_id,
+                                                 "Path": real_url,
+                                                 "Protocol": "Http",
+                                                 "IsInfiniteStream": False,
+                                                 "RequiresOpening": False,
+                                                 "RequiresClosing": False,
+                                                 "SupportsDirectPlay": True,
+                                                 "SupportsDirectStream": True,
+                                                 "SupportsTranscoding": False
+                                             }],
+                                             "PlaySessionId": "etk_direct_play_session"
+                                         }
+                                         return Response(json.dumps(fake_info), mimetype='application/json')
                                     
                                     # 真正的视频流请求，直接 302 甩出去
                                     return redirect(real_url, code=302)

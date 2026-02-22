@@ -138,7 +138,7 @@ def handle_sorting_rules():
         settings_db.save_setting(constants.DB_KEY_115_SORTING_RULES, rules)
         return jsonify({"status": "success", "message": "115 分类规则已保存"})
     
-#@lru_cache(maxsize=2048)
+@lru_cache(maxsize=2048)
 def _get_cached_115_url(pick_code, user_agent, client_ip=None):
     """
     带缓存的 115 直链获取器
