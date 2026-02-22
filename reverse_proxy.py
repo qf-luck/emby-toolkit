@@ -830,14 +830,16 @@ def proxy_all(path):
                                         fake_info = {
                                             "MediaSources": [{
                                                 "Id": item_id,
-                                                "Path": real_url, # 确保这里的 real_url 是带 UA 签名的
+                                                "Path": real_url,
                                                 "Protocol": "Http",
                                                 "IsInfiniteStream": False,
+                                                "ReadAtNativeFramerate": False,
                                                 "SupportsDirectPlay": True,
                                                 "SupportsDirectStream": True,
-                                                "SupportsTranscoding": False
+                                                "SupportsTranscoding": False,
+                                                "Type": "Default"
                                             }],
-                                            "PlaySessionId": "etk_proxy_" + str(time.time())
+                                            "PlaySessionId": f"proxy_{int(time.time())}"
                                         }
                                         return Response(json.dumps(fake_info), mimetype='application/json')
                                     
