@@ -735,6 +735,7 @@ class SmartOrganizer:
         # 步骤 C: 处理文件
         # ==================================================
         moved_count = 0
+        moved_fids = set()
         for file_item in candidates:
             fid = file_item.get('fid')
             file_name = file_item.get('n', '')
@@ -790,6 +791,7 @@ class SmartOrganizer:
 
             # 4. 一步到位移动到目的地
             if self.client.fs_move(fid, real_target_cid).get('state'):
+                moved_fids.add(fid)
                 if self.media_type == 'tv' and season_num is not None:
                     logger.info(f"  📁 [移动] {file_name} -> {std_root_name} - {s_name}")
                 else:
@@ -902,10 +904,68 @@ class SmartOrganizer:
                     except Exception as e:
                         logger.error(f"  ❌ 生成 STRM 文件失败: {e}", exc_info=True)
 
-        # 步骤 D: 清理空目录
+        # ==================================================
+        # 步骤 D: 智能清理源目录
+        # ==================================================
         if not is_source_file and moved_count > 0:
-            self.client.fs_delete([source_root_id])
-            logger.info(f"  🧹 已清理空目录")
+            # 1. 检查是否还有遗留的“有效媒体文件”
+            has_leftover_valid_files = False
+            for file_item in candidates:
+                fid = file_item.get('fid')
+                if not fid or fid in moved_fids: 
+                    continue # 文件夹或已移走的文件，跳过
+                
+                # 检查剩下的文件是不是有效文件
+                f_name = file_item.get('n', '')
+                f_ext = f_name.split('.')[-1].lower() if '.' in f_name else ''
+                
+                if self._is_junk_file(f_name): continue
+                if f_ext not in allowed_exts: continue
+                
+                f_size = _parse_115_size(file_item.get('s') or file_item.get('size'))
+                if f_ext in known_video_exts and 0 < f_size < MIN_VIDEO_SIZE: continue
+                
+                # 走到这里说明还有没移走的有效视频/字幕
+                has_leftover_valid_files = True
+                break
+
+            if has_leftover_valid_files:
+                logger.info(f"  ⚠️ 源目录仍有有效媒体文件未移动，跳过清理: {root_item.get('n')}")
+            else:
+                # 2. 目录已空（或只剩海报/NFO等垃圾），执行分类判定
+                dir_name = root_item.get('n', '')
+                should_delete = True
+                
+                # 尝试提取 TMDb ID (兼容 {tmdb=123} 或 {tmdbid-123} 等格式)
+                tmdb_match = re.search(r'\{?tmdb(?:id)?[=\-](\d+)\}?', dir_name, re.IGNORECASE)
+                
+                if tmdb_match:
+                    dir_tmdb_id = tmdb_match.group(1)
+                    
+                    # 只有电视剧需要查追剧表，电影无条件删除
+                    if self.media_type == 'tv':
+                        try:
+                            # 局部导入避免循环引用
+                            from database import watchlist_db
+                            watching_ids = watchlist_db.get_watching_tmdb_ids()
+                            
+                            if dir_tmdb_id in watching_ids:
+                                should_delete = False
+                                logger.info(f"  🛡️ [保护] 剧集正在追更中，保留源目录结构: {dir_name}")
+                        except Exception as e:
+                            logger.error(f"  ❌ 检查追剧状态失败，为安全起见跳过删除: {e}")
+                            should_delete = False
+                else:
+                    # 非标准命名目录，直接当垃圾处理 (should_delete 保持 True)
+                    logger.debug(f"  🗑️ 未匹配到 TMDb ID，视为非标准目录，准备清理: {dir_name}")
+                    
+                # 3. 执行最终审判
+                if should_delete:
+                    resp = self.client.fs_delete(source_root_id)
+                    if resp.get('state'):
+                        logger.info(f"  🧹 已清理空源目录(或垃圾目录): {dir_name}")
+                    else:
+                        logger.warning(f"  ⚠️ 清理源目录失败: {resp.get('error', '未知错误')}")
 
         return True
 
