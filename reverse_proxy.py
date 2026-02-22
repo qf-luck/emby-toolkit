@@ -833,15 +833,22 @@ def proxy_all(path):
                                                 "Path": real_url,
                                                 "Protocol": "Http",
                                                 "IsInfiniteStream": False,
-                                                "ReadAtNativeFramerate": False,
                                                 "SupportsDirectPlay": True,
                                                 "SupportsDirectStream": True,
                                                 "SupportsTranscoding": False,
+                                                "Container": "mp4", # 显式告知容器格式
+                                                "ReadAtNativeFramerate": False,
                                                 "Type": "Default"
                                             }],
-                                            "PlaySessionId": f"proxy_{int(time.time())}"
+                                            "PlaySessionId": f"etk_proxy_{int(time.time())}"
                                         }
-                                        return Response(json.dumps(fake_info), mimetype='application/json')
+                                        # 强制指定内容长度和编码，防止某些客户端解析 500
+                                        json_data = json.dumps(fake_info)
+                                        return Response(
+                                            json_data, 
+                                            mimetype='application/json',
+                                            headers={'Content-Length': str(len(json_data))}
+                                        )
                                     
                                     # 真正的视频流请求，直接 302 甩出去
                                     return redirect(real_url, code=302)
