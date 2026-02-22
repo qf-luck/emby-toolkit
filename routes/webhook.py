@@ -28,7 +28,7 @@ from services.cover_generator import CoverGeneratorService
 from database import custom_collection_db, tmdb_collection_db, settings_db, user_db, maintenance_db, media_db, queries_db, watchlist_db
 from database.log_db import LogDBManager
 from handler.tmdb import get_movie_details, get_tv_details
-from handler.p115_service import P115Service, SmartOrganizer, notify_cms_scan, get_config
+from handler.p115_service import P115Service, SmartOrganizer, get_config
 try:
     from p115client import P115Client
 except ImportError:
@@ -623,8 +623,6 @@ def emby_webhook():
                         except Exception as e:
                             logger.warning(f"  ⚠️ 清理临时目录失败: {e}")
 
-                    logger.info("  📣 [MP上传] 整理完成，通知 CMS 执行增量同步...")
-                    notify_cms_scan()
                     return jsonify({"status": "success_organized"}), 200
                 else:
                     return jsonify({"status": "failed_organize"}), 500

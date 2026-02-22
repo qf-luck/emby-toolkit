@@ -43,7 +43,6 @@
 | `proxy_merge_native_libraries` | 是否合并原生库 |
 | `proxy_native_view_selection` | 原生库筛选 |
 | `proxy_native_view_order` | 原生库排列顺序 |
-| `proxy_302_redirect_url` | 302 跳转地址 |
 | `proxy_show_missing_placeholders` | 缺失项目占位 |
 
 ## TMDb / GitHub

@@ -72,7 +72,6 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_PROXY_MERGE_NATIVE: (constants.CONFIG_SECTION_REVERSE_PROXY, 'boolean', True),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_SELECTION: (constants.CONFIG_SECTION_REVERSE_PROXY, 'list', []),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER: (constants.CONFIG_SECTION_REVERSE_PROXY, 'str', 'before'),
-    constants.CONFIG_OPTION_PROXY_302_REDIRECT_URL: (constants.CONFIG_SECTION_REVERSE_PROXY, 'string', ""),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER: (constants.CONFIG_SECTION_REVERSE_PROXY, 'str', 'before'),
     constants.CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS: (constants.CONFIG_SECTION_REVERSE_PROXY, 'boolean', False),
 
@@ -118,8 +117,6 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: (constants.CONFIG_SECTION_115, 'string', "媒体库"),
     constants.CONFIG_OPTION_LOCAL_STRM_ROOT: (constants.CONFIG_SECTION_115, 'string', "/mnt/media"),
     constants.CONFIG_OPTION_ETK_SERVER_URL: (constants.CONFIG_SECTION_115, 'string', "http://192.168.1.X:5257"),
-    constants.CONFIG_OPTION_CMS_URL: (constants.CONFIG_SECTION_115, 'string', ""),
-    constants.CONFIG_OPTION_CMS_TOKEN: (constants.CONFIG_SECTION_115, 'string', ""),
 
     # [LocalDataSource]
     constants.CONFIG_OPTION_LOCAL_DATA_PATH: (constants.CONFIG_SECTION_LOCAL_DATA, 'string', ""),

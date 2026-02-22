@@ -58,10 +58,6 @@ class P115CacheManager:
         except Exception as e:
             logger.error(f"  ❌ 写入 115 DB 缓存失败: {e}")
 
-# --- CMS通知防抖定时器 ---
-_cms_timer = None
-_cms_lock = threading.Lock()
-
 def get_config():
     return config_manager.APP_CONFIG
 
@@ -863,64 +859,6 @@ def _parse_115_size(size_val):
         pass
     return 0
 
-def _perform_cms_notify():
-    """
-    真正执行 CMS 通知的函数 (被定时器调用)
-    """
-    config = get_config()
-    cms_url = config.get(constants.CONFIG_OPTION_CMS_URL)
-    cms_token = config.get(constants.CONFIG_OPTION_CMS_TOKEN)
-
-    if not cms_url or not cms_token:
-        return
-
-    cms_url = cms_url.rstrip('/')
-    enable_smart_organize = config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False)
-
-    # 根据模式选择参数
-    if enable_smart_organize:
-        api_url = f"{cms_url}/api/sync/lift_by_token"
-        params = {"type": "lift_sync", "token": cms_token}
-        log_msg = "增量同步"
-    else:
-        api_url = f"{cms_url}/api/sync/lift_by_token"
-        params = {"type": "auto_organize", "token": cms_token}
-        log_msg = "自动整理"
-
-    logger.info(f"  📣 [CMS] 防抖结束，开始: {log_msg} ...")
-
-    try:
-        response = requests.get(api_url, params=params, timeout=10)
-        response.raise_for_status()
-        res_json = response.json()
-        if res_json.get('code') == 200 or res_json.get('success'):
-            logger.info(f"  ✅ CMS 通知成功: {res_json.get('msg', 'OK')}")
-        else:
-            logger.warning(f"  ⚠️ CMS 通知返回异常: {res_json}")
-    except Exception as e:
-        logger.warning(f"  ⚠️ CMS 通知发送失败: {e}")
-
-
-def notify_cms_scan():
-    """
-    通知 CMS 执行目录整理 (防抖入口)
-    机制：每次调用都会重置计时器，只有静默 60 秒后才会真正发送请求。
-    """
-    global _cms_timer
-
-    with _cms_lock:
-        # 如果已有计时器在运行，取消它 (说明1分钟内又有新入库)
-        if _cms_timer is not None:
-            _cms_timer.cancel()
-            logger.info("  ⏳ 检测到连续入库，重置 CMS 通知计时器 (60s)")
-        else:
-            logger.info("  ⏳ 启动 CMS 通知计时器，等待 60s 无新入库后发送...")
-
-        # 创建新计时器：60秒后执行 _perform_cms_notify
-        _cms_timer = threading.Timer(60.0, _perform_cms_notify)
-        _cms_timer.daemon = True # 设置为守护线程，防止阻塞主程序退出
-        _cms_timer.start()
-
 def get_115_account_info():
     """
     极简状态检查：只验证 Cookie 是否有效，不获取任何详情
@@ -1137,9 +1075,6 @@ def task_scan_and_organize_115(processor=None):
                     except: pass
 
         logger.info(f"=== 扫描结束，成功归类 {processed_count} 个，移入未识别 {moved_to_unidentified} 个 ===")
-
-        if processed_count > 0:
-            notify_cms_scan()
 
     except Exception as e:
         logger.error(f"  ⚠️ 115 扫描任务异常: {e}", exc_info=True)

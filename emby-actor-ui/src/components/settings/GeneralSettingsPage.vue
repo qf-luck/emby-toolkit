@@ -291,15 +291,6 @@
                         </n-text>
                       </template>
                     </n-form-item>
-                    <n-form-item label="CMS 通知地址" path="cms_url">
-                        <n-input v-model:value="configModel.cms_url" placeholder="http://ip:port" />
-                    </n-form-item>
-                    <n-form-item label="CMS Token" path="cms_token">
-                        <n-input v-model:value="configModel.cms_token" type="password" show-password-on="click" placeholder="Token" />
-                        <template #feedback>
-                            <n-text depth="3" style="font-size:0.8em;">整理完成后通知 CMS 执行扫库。</n-text>
-                        </template>
-                    </n-form-item>
                   </n-card>
                 </n-gi>
 
@@ -511,26 +502,6 @@
                             <n-switch v-model:value="configModel.proxy_show_missing_placeholders" :disabled="!configModel.proxy_enabled"/>
                             <n-text depth="3" style="font-size: 0.8em;">在榜单中显示未入库海报</n-text>
                          </n-space>
-                      </n-form-item-grid-item>
-
-                      <!-- 4. 302重定向 (占满一行，URL通常较长) -->
-                      <n-form-item-grid-item span="1 m:2" label-width="100">
-                        <template #label>
-                          <div style="display: flex; align-items: center; justify-content: flex-end; width: 100%;">
-                            <span>302重定向</span>
-                            <n-tooltip trigger="hover">
-                              <template #trigger>
-                                <n-icon :component="AlertIcon" class="info-icon" style="margin-left: 4px;" />
-                              </template>
-                              需重启容器生效
-                            </n-tooltip>
-                          </div>
-                        </template>
-                        <n-input 
-                          v-model:value="configModel.proxy_302_redirect_url" 
-                          placeholder="例如: http://192.168.31.177:9096" 
-                          :disabled="!configModel.proxy_enabled"
-                        />
                       </n-form-item-grid-item>
 
                       <!-- 5. 合并原生库 -->
@@ -2030,14 +2001,13 @@ const save = async () => {
         cleanConfigPayload.libraries_to_process = configModel.value.libraries_to_process;
         cleanConfigPayload.proxy_native_view_selection = configModel.value.proxy_native_view_selection;
     }
-    const restartNeeded = initialRestartableConfig.value && (cleanConfigPayload.proxy_port !== initialRestartableConfig.value.proxy_port || cleanConfigPayload.proxy_302_redirect_url !== initialRestartableConfig.value.proxy_302_redirect_url || cleanConfigPayload.log_rotation_size_mb !== initialRestartableConfig.value.log_rotation_size_mb || cleanConfigPayload.log_rotation_backup_count !== initialRestartableConfig.value.log_rotation_backup_count || cleanConfigPayload.emby_server_url !== initialRestartableConfig.value.emby_server_url);
+    const restartNeeded = initialRestartableConfig.value && (cleanConfigPayload.proxy_port !== initialRestartableConfig.value.proxy_port || cleanConfigPayload.log_rotation_size_mb !== initialRestartableConfig.value.log_rotation_size_mb || cleanConfigPayload.log_rotation_backup_count !== initialRestartableConfig.value.log_rotation_backup_count || cleanConfigPayload.emby_server_url !== initialRestartableConfig.value.emby_server_url);
     const performSaveAndUpdateState = async () => {
       const success = await handleSaveConfig(cleanConfigPayload);
       if (success) {
         message.success('所有设置已成功保存！');
         initialRestartableConfig.value = {
           proxy_port: cleanConfigPayload.proxy_port,
-          proxy_302_redirect_url: cleanConfigPayload.proxy_302_redirect_url,
           log_rotation_size_mb: cleanConfigPayload.log_rotation_size_mb,
           log_rotation_backup_count: cleanConfigPayload.log_rotation_backup_count,
           emby_server_url: cleanConfigPayload.emby_server_url,
@@ -2300,7 +2270,6 @@ onMounted(async () => {
       }
       initialRestartableConfig.value = {
         proxy_port: configModel.value.proxy_port,
-        proxy_302_redirect_url: configModel.value.proxy_302_redirect_url,
         log_rotation_size_mb: configModel.value.log_rotation_size_mb,
         log_rotation_backup_count: configModel.value.log_rotation_backup_count,
         emby_server_url: configModel.value.emby_server_url,

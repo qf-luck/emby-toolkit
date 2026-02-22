@@ -293,13 +293,11 @@ def ensure_nginx_config():
         # 2. 从 APP_CONFIG 获取值
         emby_url = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL, "")
         nginx_listen_port = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_PORT, 8097)
-        redirect_url = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_302_REDIRECT_URL, "")
 
         # 3. 准备替换值
         emby_upstream = emby_url.replace("http://", "").replace("https://", "").rstrip('/')
         # ★★★ 核心修改 2: Nginx 和 Python 代理在同一容器内，使用 localhost 通信 ★★★
         proxy_upstream = "127.0.0.1:7758" 
-        redirect_upstream = redirect_url.replace("http://", "").replace("https://", "").rstrip('/')
 
         if not emby_upstream:
             logger.error("config.ini 中未配置 Emby 服务器地址，无法生成 Nginx 配置！")
@@ -310,7 +308,6 @@ def ensure_nginx_config():
             'EMBY_UPSTREAM': emby_upstream,
             'PROXY_UPSTREAM': proxy_upstream,
             'NGINX_LISTEN_PORT': nginx_listen_port,
-            'REDIRECT_UPSTREAM': redirect_upstream,
             'NGINX_MAX_BODY_SIZE': '128m'
         }
         final_config_content = template.render(context)

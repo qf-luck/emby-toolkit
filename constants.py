@@ -56,8 +56,6 @@ DB_KEY_115_SORTING_RULES = "p115_sorting_rules"                # 存储 115 分�
 CONFIG_OPTION_115_MEDIA_ROOT_CID = "p115_media_root_cid"       # 115网盘媒体库根目录CID
 CONFIG_OPTION_LOCAL_STRM_ROOT = "local_strm_root"              # 本地生成.strm的根目录
 CONFIG_OPTION_ETK_SERVER_URL = "etk_server_url"                # ETK服务器地址 (用于strm文件内)
-CONFIG_OPTION_CMS_URL = "cms_url"                              # CMS 地址
-CONFIG_OPTION_CMS_TOKEN = "cms_token"                          # CMS Token
 
 # ==============================================================================
 # ✨ 通知服务 (Notification Services)
@@ -74,8 +72,6 @@ CONFIG_OPTION_PROXY_ENABLED = "proxy_enabled"
 CONFIG_OPTION_PROXY_PORT = "proxy_port"
 CONFIG_OPTION_PROXY_MERGE_NATIVE = "proxy_merge_native_libraries"
 CONFIG_OPTION_PROXY_NATIVE_VIEW_SELECTION = "proxy_native_view_selection"  # List[str]
-CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER = "proxy_native_view_order"  # str, 'before' or 'after'
-CONFIG_OPTION_PROXY_302_REDIRECT_URL = "proxy_302_redirect_url"
 CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER = "proxy_native_view_order"  # str, 'before' or 'after'
 CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS = "proxy_show_missing_placeholders"
 
