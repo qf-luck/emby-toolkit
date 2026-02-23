@@ -1410,17 +1410,15 @@ def task_full_sync_strm_and_subs(processor=None):
         items_yielded = 0
         files_generated = 0
         
-        # A. 优先尝试极速遍历 (完美适配 iter_files_with_path_skim)
+        # A. 优先尝试极速遍历
         try:
             from p115client.tool.iterdir import iter_files_with_path_skim
             
-            # ★ 修复 1：增加 max_workers=2 (或 3)，限制并发，防止瞬间请求过多导致 115 接口报错中断
             iterator = iter_files_with_path_skim(
                 client, 
                 int(base_cid), 
                 with_ancestors=True, 
-                max_workers=2,
-                max_dirs=5 
+                max_workers=1 
             )
             
             for info in iterator:
@@ -1430,14 +1428,12 @@ def task_full_sync_strm_and_subs(processor=None):
                 
                 items_yielded += 1
                 
-                # ★ 修复 2：极速模式下，节点字典列表存在 'ancestors' 里，而不是 'path' 里
                 ancestors = info.get('ancestors', [])
                 rel_path_parts = []
                 
                 if isinstance(ancestors, list) and len(ancestors) > 0:
                     found_base = False
                     for node in ancestors:
-                        # p115client 的 ancestors 节点通常用 'id' 而不是 'cid'
                         node_id = str(node.get('id') or node.get('cid', ''))
                         if node_id == str(base_cid):
                             found_base = True
@@ -1448,7 +1444,6 @@ def task_full_sync_strm_and_subs(processor=None):
                 process_file_info(info, rel_path_parts, base_cid)
                 
         except Exception as e:
-            # ★ 修复 3：打印出具体的报错详情 (repr)，以后如果再降级，看日志一眼就能知道是网络断了还是啥原因
             logger.warning(f"  ⚠️ 极速遍历异常 CID:{base_cid} - 错误详情: {repr(e)}")
 
         # B. 自动降级：如果极速模式没出货，启动标准递归
