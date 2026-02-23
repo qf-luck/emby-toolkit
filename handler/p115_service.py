@@ -1551,112 +1551,81 @@ def task_full_sync_strm_and_subs(processor=None):
     end_msg = "=== 全量 STRM 与字幕同步结束 ===" if download_subs else "=== 全量 STRM 生成结束 ==="
     update_progress(100, end_msg)
 
-def sync_delete_from_local_path(local_path, is_directory):
+def delete_115_files_by_webhook(item_path, pickcodes):
     """
-    监听本地文件删除，反向删除 115 网盘源文件
+    接收神医 Webhook 传来的路径和提取码，精准销毁 115 网盘文件。
     """
-    config = get_config()
-    if not config.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
-        return
-
-    # ★★★ 过滤：如果不是目录，则必须是 .strm 文件才响应 ★★★
-    if not is_directory and not local_path.lower().endswith('.strm'):
-        return
+    if not pickcodes or not item_path: return
 
     client = P115Service.get_client()
     if not client: return
 
     try:
-        base_name = os.path.basename(local_path)
-        parent_dir_name = os.path.basename(os.path.dirname(local_path))
+        # 1. 从本地路径中提取带有 TMDb ID 的主目录名称 (例如: 爱我爱我 (2026) {tmdb=1317672})
+        match = re.search(r'([^/\\]+\{tmdb=\d+\})', item_path)
+        if not match:
+            logger.warning(f"  ⚠️ [联动删除] 无法从路径提取 TMDb 目录名: {item_path}")
+            return
+        tmdb_folder_name = match.group(1)
+
+        # 2. 查找该主目录在 115 上的 CID
+        base_cid = P115CacheManager.get_cid_by_name(tmdb_folder_name)
+        if not base_cid:
+            # 缓存没命中，尝试模糊搜索兜底
+            res = client.fs_files({'search_value': tmdb_folder_name, 'limit': 10})
+            for item in res.get('data', []):
+                if item.get('n') == tmdb_folder_name and not item.get('fid'):
+                    base_cid = item.get('cid')
+                    break
+
+        if not base_cid:
+            logger.warning(f"  ⚠️ [联动删除] 未在 115 找到对应主目录，可能已被删除: {tmdb_folder_name}")
+            return
+
+        # 3. 递归扫描该主目录，将 Pickcode 映射为 115 的文件 ID (fid)
+        fids_to_delete = []
         
-        logger.info(f"  💀 [联动删除] 开始处理: {base_name} (目录: {is_directory})")
+        def scan_and_match(cid):
+            res = client.fs_files({'cid': cid, 'limit': 1000})
+            for item in res.get('data', []):
+                if item.get('fid'):
+                    # 如果文件的提取码在我们要删除的列表中
+                    if item.get('pc') in pickcodes:
+                        fids_to_delete.append(item.get('fid'))
+                elif item.get('cid'):
+                    scan_and_match(item.get('cid'))
 
-        if is_directory:
-            # ==========================================
-            # 删的是整个文件夹 (连锅端)
-            # ==========================================
-            target_cid = None
-            
-            # 1. 如果是主目录 (带有 {tmdb=xxx})，名字是全局唯一的，直接按名字查缓存
-            if re.search(r'\{tmdb=\d+\}', base_name):
-                target_cid = P115CacheManager.get_cid_by_name(base_name)
+        logger.debug(f"  🔍 [联动删除] 正在网盘目录 '{tmdb_folder_name}' 中匹配文件...")
+        scan_and_match(base_cid)
+
+        # 4. 执行物理销毁
+        if fids_to_delete:
+            resp = client.fs_delete(fids_to_delete)
+            if resp.get('state'):
+                logger.info(f"  💥 [联动删除] 成功在 115 网盘物理删除了 {len(fids_to_delete)} 个文件！")
             else:
-                # 2. 如果是季目录 (如 Season 01)，先找它爹 (主目录)
-                parent_cid = P115CacheManager.get_cid_by_name(parent_dir_name)
-                if parent_cid:
-                    target_cid = P115CacheManager.get_cid(parent_cid, base_name)
+                logger.error(f"  ❌ [联动删除] 115 删除接口调用失败: {resp}")
 
-            # 3. 兜底：缓存没找到，尝试模糊搜索
-            if not target_cid:
-                res = client.fs_files({'search_value': base_name, 'limit': 10})
+            # 5. 鞭尸检查：如果主目录里已经没有视频文件了，连目录一起扬了
+            video_count = 0
+            def count_videos(cid):
+                nonlocal video_count
+                res = client.fs_files({'cid': cid, 'limit': 1000})
                 for item in res.get('data', []):
-                    if item.get('n') == base_name and not item.get('fid'):
-                        target_cid = item.get('cid')
-                        break
-            
-            if target_cid:
-                resp = client.fs_delete(target_cid)
-                if resp.get('state'):
-                    logger.info(f"  💥 [联动删除] 已在 115 网盘物理销毁目录: {base_name}")
-                    P115CacheManager.delete_cid(target_cid) # ★ 同步清理本地缓存
-                else:
-                    logger.warning(f"  ⚠️ [联动删除] 115 目录删除失败: {resp.get('error', '未知错误')}")
-            else:
-                logger.warning(f"  ⚠️ [联动删除] 未在 115 找到对应目录，可能已被删除: {base_name}")
-
-        else:
-            # ==========================================
-            # 删的是单个文件 (.strm)
-            # ==========================================
-            name_without_ext = os.path.splitext(base_name)[0]
-            parent_cid = None
-            
-            # 1. 找父目录 CID
-            if re.search(r'\{tmdb=\d+\}', parent_dir_name):
-                parent_cid = P115CacheManager.get_cid_by_name(parent_dir_name)
-            else:
-                # 父目录可能是 Season 01，爷爷目录才是带有 tmdb 的主目录
-                grandpa_name = os.path.basename(os.path.dirname(os.path.dirname(local_path)))
-                grandpa_cid = P115CacheManager.get_cid_by_name(grandpa_name)
-                if grandpa_cid:
-                    parent_cid = P115CacheManager.get_cid(grandpa_cid, parent_dir_name)
-
-            if not parent_cid:
-                res = client.fs_files({'search_value': parent_dir_name, 'limit': 10})
-                for item in res.get('data', []):
-                    if item.get('n') == parent_dir_name and not item.get('fid'):
-                        parent_cid = item.get('cid')
-                        break
-            
-            if parent_cid:
-                # 2. 在它爹的肚子里找它
-                files_res = client.fs_files({'cid': parent_cid, 'limit': 1000})
-                target_fid = None
-                video_count = 0
-                
-                for item in files_res.get('data', []):
                     if item.get('fid'):
-                        item_name_no_ext = os.path.splitext(item.get('n', ''))[0]
-                        if item_name_no_ext == name_without_ext:
-                            target_fid = item.get('fid')
-                        else:
-                            ext = item.get('n', '').split('.')[-1].lower()
-                            if ext in ['mp4', 'mkv', 'avi', 'ts', 'iso']:
-                                video_count += 1
-                
-                if target_fid:
-                    resp = client.fs_delete(target_fid)
-                    if resp.get('state'):
-                        logger.info(f"  💥 [联动删除] 已在 115 网盘物理销毁文件: {base_name}")
-                    
-                    # 3. 鞭尸：如果目录里没视频了，连目录一起扬了！
-                    if video_count == 0:
-                        client.fs_delete(parent_cid)
-                        logger.info(f"  🧹 [联动删除] 目录已空，连带销毁父目录: {parent_dir_name}")
-                        P115CacheManager.delete_cid(parent_cid) # ★ 同步清理本地缓存
-                else:
-                    logger.debug(f"  ⚠️ [联动删除] 未在 115 找到对应文件 (可能已被连锅端): {base_name}")
+                        ext = str(item.get('n', '')).split('.')[-1].lower()
+                        if ext in ['mp4', 'mkv', 'avi', 'ts', 'iso']:
+                            video_count += 1
+                    elif item.get('cid'):
+                        count_videos(item.get('cid'))
+
+            count_videos(base_cid)
+            if video_count == 0:
+                client.fs_delete(base_cid)
+                P115CacheManager.delete_cid(base_cid) # 清理本地缓存
+                logger.info(f"  🧹 [联动删除] 清理主目录缓存: {tmdb_folder_name}")
+        else:
+            logger.warning(f"  ⚠️ [联动删除] 扫描完毕，但未在网盘找到匹配的提取码文件。")
 
     except Exception as e:
-        logger.error(f"  ❌ 联动删除执行失败: {e}", exc_info=True)
+        logger.error(f"  ❌ [联动删除] 执行异常: {e}", exc_info=True)

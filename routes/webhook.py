@@ -531,6 +531,53 @@ def emby_webhook():
     event_type = data.get("Event") # Emby
     mp_event_type = data.get("type") # MP
     # ======================================================================
+    # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
+    # ======================================================================
+    if event_type == "deep.delete":
+        logger.info("  💀 收到神医助手深度删除通知，准备执行网盘联动清理...")
+        
+        # 1. 检查开关
+        nb_config = get_config()
+        if not nb_config.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
+            logger.debug("  🚫 联动删除未开启，忽略深度删除通知。")
+            return jsonify({"status": "ignored_sync_delete_disabled"}), 200
+
+        description = data.get("Description", "")
+        if not description:
+            return jsonify({"status": "ignored_no_description"}), 200
+
+        try:
+            # 2. 提取 Item Path (用于定位网盘里的主目录)
+            import re
+            path_match = re.search(r'Item Path:\n(.*?)\n\n', description)
+            item_path = path_match.group(1).strip() if path_match else ""
+
+            # 3. 提取 Mount Paths 中的 115 提取码 (Pickcode)
+            pickcodes = []
+            if "Mount Paths:\n" in description:
+                mount_paths_str = description.split("Mount Paths:\n")[-1]
+                urls = [line.strip() for line in mount_paths_str.split('\n') if line.strip()]
+                
+                for url in urls:
+                    # 正则匹配 ETK 直链格式: /api/p115/play/提取码
+                    pc_match = re.search(r'/api/p115/play/([a-zA-Z0-9]+)', url)
+                    if pc_match:
+                        pickcodes.append(pc_match.group(1))
+
+            if pickcodes and item_path:
+                logger.info(f"  🎯 成功提取到 {len(pickcodes)} 个 115 提取码，交由后台执行物理销毁。")
+                # 异步执行网盘删除，不阻塞 Webhook
+                from handler.p115_service import delete_115_files_by_webhook
+                spawn(delete_115_files_by_webhook, item_path, pickcodes)
+                return jsonify({"status": "deep_delete_task_started"}), 202
+            else:
+                logger.warning("  ⚠️ 深度删除通知中未找到有效的 ETK 直链或路径，跳过处理。")
+                return jsonify({"status": "ignored_no_valid_pickcodes"}), 200
+
+        except Exception as e:
+            logger.error(f"  ❌ 解析深度删除通知失败: {e}", exc_info=True)
+            return jsonify({"status": "error_parsing_deep_delete"}), 500
+    # ======================================================================
     # ★★★ 处理 MoviePilot transfer.complete 事件 ★★★
     # ======================================================================
     if mp_event_type == "transfer.complete":
@@ -778,7 +825,7 @@ def emby_webhook():
             logger.error(f"  ➜ 通过 Webhook 更新用户媒体数据时失败: {e}", exc_info=True)
             return jsonify({"status": "error_updating_user_data"}), 500
 
-    trigger_events = ["item.add", "library.new", "library.deleted", "metadata.update", "image.update", "collection.items.removed", "None"]
+    trigger_events = ["item.add", "library.new", "library.deleted", "metadata.update", "image.update", "collection.items.removed", "deep.delete", "None"]
     if event_type not in trigger_events:
         logger.debug(f"  ➜ Webhook事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
         return jsonify({"status": "event_ignored_not_in_trigger_list"}), 200
