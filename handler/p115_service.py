@@ -1280,7 +1280,10 @@ def task_full_sync_strm_and_subs(processor=None):
     极速全量生成 STRM 与 同步字幕 (带防失败自动降级机制)
     修复版：完美对齐网盘与本地分类目录的层级路径
     """
-    logger.info("=== 🚀 开始全量生成 STRM 与 同步字幕 ===")
+    config = get_config()
+    download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
+    start_msg = "=== 🚀 开始全量生成 STRM 与 同步字幕 ===" if download_subs else "=== 🚀 开始全量生成 STRM (已跳过字幕) ==="
+    logger.info(start_msg)
     
     try:
         import task_manager
@@ -1291,11 +1294,9 @@ def task_full_sync_strm_and_subs(processor=None):
         if task_manager: task_manager.update_status_from_thread(prog, msg)
         logger.info(msg)
 
-    config = get_config()
     local_root = config.get(constants.CONFIG_OPTION_LOCAL_STRM_ROOT)
     etk_url = config.get(constants.CONFIG_OPTION_ETK_SERVER_URL, "").rstrip('/')
     media_root_cid = str(config.get(constants.CONFIG_OPTION_115_MEDIA_ROOT_CID, '0'))
-    download_subs = config.get(constants.CONFIG_OPTION_115_DOWNLOAD_SUBS, True)
     
     known_video_exts = {'mp4', 'mkv', 'avi', 'ts', 'iso', 'rmvb', 'wmv', 'mov', 'm2ts', 'flv', 'mpg'}
     known_sub_exts = {'srt', 'ass', 'ssa', 'sub', 'vtt', 'sup'}
@@ -1500,7 +1501,8 @@ def task_full_sync_strm_and_subs(processor=None):
                 
         logger.info(f"  ✅ [{category_rel_path}] 同步完成，处理文件: {files_generated}")
 
-    update_progress(100, "=== 全量 STRM 与字幕同步结束 ===")
+    end_msg = "=== 全量 STRM 与字幕同步结束 ===" if download_subs else "=== 全量 STRM 生成结束 ==="
+    update_progress(100, end_msg)
 
 def sync_delete_from_local_path(local_path, is_directory):
     """
