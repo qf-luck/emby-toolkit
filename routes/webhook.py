@@ -533,9 +533,6 @@ def emby_webhook():
     # ======================================================================
     # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
     # ======================================================================
-    # ======================================================================
-    # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
-    # ======================================================================
     if event_type == "deep.delete":
         logger.info("  💀 收到神医助手深度删除通知，准备执行清理流程...")
         
@@ -593,7 +590,7 @@ def emby_webhook():
                         pickcodes.append(pc_match.group(1))
 
             if pickcodes and item_path:
-                logger.info(f"  🎯 成功提取到 {len(pickcodes)} 个 115 提取码，交由后台执行物理销毁。")
+                logger.info(f"  🎯 成功提取到 {len(pickcodes)} 个 115 提取码，交由后台执行联动删除。")
                 from handler.p115_service import delete_115_files_by_webhook
                 spawn(delete_115_files_by_webhook, item_path, pickcodes)
                 return jsonify({"status": "deep_delete_task_started"}), 202
