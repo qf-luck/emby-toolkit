@@ -1554,6 +1554,7 @@ def task_full_sync_strm_and_subs(processor=None):
 def delete_115_files_by_webhook(item_path, pickcodes):
     """
     接收神医 Webhook 传来的路径和提取码，精准销毁 115 网盘文件。
+    ★ 增加防风控限流与熔断保护机制
     """
     if not pickcodes or not item_path: return
 
@@ -1586,23 +1587,27 @@ def delete_115_files_by_webhook(item_path, pickcodes):
         fids_to_delete = []
         
         def scan_and_match(cid):
-            res = client.fs_files({'cid': cid, 'limit': 1000})
-            for item in res.get('data', []):
-                if item.get('fid'):
-                    # 如果文件的提取码在我们要删除的列表中
-                    if item.get('pc') in pickcodes:
-                        fids_to_delete.append(item.get('fid'))
-                elif item.get('cid'):
-                    scan_and_match(item.get('cid'))
+            try:
+                time.sleep(1.5) # ★ 强制防风控限流：每次请求间隔 1.5 秒
+                res = client.fs_files({'cid': cid, 'limit': 1000})
+                for item in res.get('data', []):
+                    if item.get('fid'):
+                        # 如果文件的提取码在我们要删除的列表中
+                        if item.get('pc') in pickcodes:
+                            fids_to_delete.append(item.get('fid'))
+                    elif item.get('cid'):
+                        scan_and_match(item.get('cid'))
+            except Exception as e:
+                logger.warning(f"  ⚠️ [联动删除] 扫描目录 {cid} 时被风控或报错: {e}")
 
-        logger.debug(f"  🔍 [联动删除] 正在网盘目录 '{tmdb_folder_name}' 中匹配文件...")
+        logger.debug(f"  🔍 [联动删除] 正在网盘目录 '{tmdb_folder_name}' 中匹配文件 (带防风控延迟)...")
         scan_and_match(base_cid)
 
         # 4. 执行物理销毁
         if fids_to_delete:
             resp = client.fs_delete(fids_to_delete)
             if resp.get('state'):
-                logger.info(f"  💥 [联动删除] 成功在 115 网盘物理删除了 {len(fids_to_delete)} 个文件！")
+                logger.info(f"  💥 [联动删除] 成功在 115 网盘删除了 {len(fids_to_delete)} 个文件！")
             else:
                 logger.error(f"  ❌ [联动删除] 115 删除接口调用失败: {resp}")
 
@@ -1610,20 +1615,28 @@ def delete_115_files_by_webhook(item_path, pickcodes):
             video_count = 0
             def count_videos(cid):
                 nonlocal video_count
-                res = client.fs_files({'cid': cid, 'limit': 1000})
-                for item in res.get('data', []):
-                    if item.get('fid'):
-                        ext = str(item.get('n', '')).split('.')[-1].lower()
-                        if ext in ['mp4', 'mkv', 'avi', 'ts', 'iso']:
-                            video_count += 1
-                    elif item.get('cid'):
-                        count_videos(item.get('cid'))
+                try:
+                    time.sleep(1.5) # ★ 强制防风控限流
+                    res = client.fs_files({'cid': cid, 'limit': 1000})
+                    for item in res.get('data', []):
+                        if item.get('fid'):
+                            ext = str(item.get('n', '')).split('.')[-1].lower()
+                            if ext in ['mp4', 'mkv', 'avi', 'ts', 'iso']:
+                                video_count += 1
+                        elif item.get('cid'):
+                            count_videos(item.get('cid'))
+                except Exception as e:
+                    logger.warning(f"  ⚠️ [联动删除] 检查空目录 {cid} 时报错: {e}")
+                    # ★ 熔断保护：如果接口报错，假装里面还有视频，绝对不执行删目录操作！
+                    video_count += 999 
 
             count_videos(base_cid)
             if video_count == 0:
                 client.fs_delete(base_cid)
                 P115CacheManager.delete_cid(base_cid) # 清理本地缓存
-                logger.info(f"  🧹 [联动删除] 清理主目录缓存: {tmdb_folder_name}")
+                logger.info(f"  🧹 [联动删除] 清理本地主目录缓存: {tmdb_folder_name}")
+            else:
+                logger.debug(f"  🛡️ [联动删除] 目录内仍有视频或检查受阻，保留主目录。")
         else:
             logger.warning(f"  ⚠️ [联动删除] 扫描完毕，但未在网盘找到匹配的提取码文件。")
 
