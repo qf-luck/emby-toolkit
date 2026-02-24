@@ -171,7 +171,10 @@ def init_db():
                         overview_embedding JSONB,
                         release_date DATE,
                         release_year INTEGER,
+                        last_air_date DATE,
                         poster_path TEXT,
+                        backdrop_path TEXT, 
+                        homepage TEXT,
                         runtime_minutes INTEGER,
                         rating REAL,
                         official_rating_json JSONB,
@@ -179,7 +182,8 @@ def init_db():
                         genres_json JSONB,
                         actors_json JSONB,
                         directors_json JSONB,
-                        studios_json JSONB,
+                        production_companies_json JSONB, 
+                        networks_json JSONB,
                         countries_json JSONB,
                         keywords_json JSONB,
                         last_updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
@@ -269,7 +273,6 @@ def init_db():
                         name TEXT NOT NULL UNIQUE,
                         enabled BOOLEAN DEFAULT TRUE,
                         scope_rules JSONB DEFAULT '[]'::jsonb,
-                        delete_after_resubscribe BOOLEAN DEFAULT FALSE,
                         sort_order INTEGER DEFAULT 0,
                         resubscribe_resolution_enabled BOOLEAN DEFAULT FALSE,
                         resubscribe_resolution_threshold INT DEFAULT 1920,
@@ -281,25 +284,28 @@ def init_db():
                         resubscribe_quality_include JSONB,
                         resubscribe_effect_enabled BOOLEAN DEFAULT FALSE,
                         resubscribe_effect_include JSONB,
+                        resubscribe_subtitle_effect_only BOOLEAN DEFAULT FALSE,
                         resubscribe_filesize_enabled BOOLEAN DEFAULT FALSE,
                         resubscribe_filesize_operator TEXT DEFAULT 'lt', 
                         resubscribe_filesize_threshold_gb REAL DEFAULT 10.0,
                         resubscribe_codec_enabled BOOLEAN DEFAULT FALSE,
                         resubscribe_codec_include JSONB,
                         resubscribe_subtitle_skip_if_audio_exists BOOLEAN DEFAULT FALSE,
-                        auto_resubscribe BOOLEAN DEFAULT FALSE, 
                         custom_resubscribe_enabled BOOLEAN DEFAULT FALSE, 
                         consistency_check_enabled BOOLEAN DEFAULT FALSE,
                         consistency_must_match_resolution BOOLEAN DEFAULT FALSE,
                         consistency_must_match_group BOOLEAN DEFAULT FALSE,
                         consistency_must_match_code BOOLEAN DEFAULT FALSE,
+                        consistency_must_match_codec BOOLEAN DEFAULT FALSE,
                         rule_type TEXT DEFAULT 'resubscribe',           
                         filter_rating_enabled BOOLEAN DEFAULT FALSE, 
                         filter_rating_min REAL DEFAULT 0,  
                         delete_mode TEXT DEFAULT 'episode',          
                         delete_delay_seconds INTEGER DEFAULT 0,
                         filter_rating_ignore_zero BOOLEAN DEFAULT FALSE,
-                        filter_missing_episodes_enabled BOOLEAN DEFAULT FALSE
+                        filter_missing_episodes_enabled BOOLEAN DEFAULT FALSE,
+                        resubscribe_source TEXT DEFAULT 'moviepilot',
+                        resubscribe_entire_season BOOLEAN DEFAULT FALSE
                     )
                 """)
 
@@ -394,6 +400,20 @@ def init_db():
                     )
                 """)
 
+                logger.trace("  ➜ 正在创建 'p115_filesystem_cache' 表 (目录树缓存)...")
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS p115_filesystem_cache (
+                        id TEXT PRIMARY KEY,           -- 115 的 cid (文件夹) 或 fid (文件)
+                        parent_id TEXT NOT NULL,       -- 父目录 ID (根目录为 '0')
+                        name TEXT NOT NULL,            -- 文件/文件夹名称
+                        updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(), -- 最后同步时间
+                        
+                        -- 复合唯一约束：同一个父目录下不能有同名文件 (用于快速查找)
+                        -- 注意：115 实际上允许同名，但在我们的管理逻辑中通常假设唯一，或者只缓存最新的
+                        CONSTRAINT uniq_p115_parent_name UNIQUE (parent_id, name)
+                    )
+                """)
+
                 # ======================================================================
                 # ★★★ 数据库平滑升级 (START) ★★★
                 # 此处代码用于新增在新版本中添加的列。
@@ -412,20 +432,6 @@ def init_db():
                             all_existing_columns[table] = set()
                         all_existing_columns[table].add(row['column_name'])
 
-                    # ======================================================================
-                    # ★★★ 特殊迁移：分级字段重构 ★★★
-                    # ======================================================================
-                    if 'media_metadata' in all_existing_columns:
-                        cols = all_existing_columns['media_metadata']
-                        
-                        # 1. 重命名 rating_json -> official_rating_json
-                        if 'rating_json' in cols and 'official_rating_json' not in cols:
-                            logger.info("    ➜ [数据库升级] 检测到旧字段 'rating_json'，正在重命名为 'official_rating_json'...")
-                            cursor.execute("ALTER TABLE media_metadata RENAME COLUMN rating_json TO official_rating_json;")
-                            # 更新本地集合以便后续检查
-                            cols.remove('rating_json')
-                            cols.add('official_rating_json')
-
                     schema_upgrades = {
                         'emby_users': {
                             "policy_json": "JSONB"  
@@ -435,61 +441,16 @@ def init_db():
                         },
                         'media_metadata': {
                             "original_language": "TEXT",
-                            "asset_details_json": "JSONB",
-                            "last_updated_at": "TIMESTAMP WITH TIME ZONE",
-                            "overview": "TEXT",
-                            "overview_embedding": "JSONB",
-                            "official_rating_json": "JSONB", 
-                            "custom_rating": "TEXT",         
-                            "keywords_json": "JSONB",
-                            "in_library": "BOOLEAN DEFAULT FALSE NOT NULL",
-                            "emby_item_ids_json": "JSONB NOT NULL DEFAULT '[]'::jsonb",
-                            "subscription_status": "TEXT NOT NULL DEFAULT 'NONE'",
-                            "subscription_sources_json": "JSONB NOT NULL DEFAULT '[]'::jsonb",
-                            "first_requested_at": "TIMESTAMP WITH TIME ZONE",
-                            "last_subscribed_at": "TIMESTAMP WITH TIME ZONE",
-                            "created_at": "TIMESTAMP WITH TIME ZONE",
-                            "tags_json": "JSONB",
-                            "poster_path": "TEXT",
-                            "runtime_minutes": "INTEGER",
-                            "last_episode_to_air_json": "JSONB",
-                            "parent_series_tmdb_id": "TEXT",
-                            "season_number": "INTEGER",
-                            "episode_number": "INTEGER",
-                            "ignore_reason": "TEXT",
-                            "watching_status": "TEXT DEFAULT 'NONE'",
-                            "paused_until": "DATE",
-                            "force_ended": "BOOLEAN DEFAULT FALSE",
-                            "watchlist_last_checked_at": "TIMESTAMP WITH TIME ZONE",
-                            "watchlist_tmdb_status": "TEXT",
-                            "watchlist_next_episode_json": "JSONB",
-                            "watchlist_missing_info_json": "JSONB",
-                            "watchlist_is_airing": "BOOLEAN DEFAULT FALSE",
-                            "total_episodes": "INTEGER DEFAULT 0",
-                            "total_episodes_locked": "BOOLEAN DEFAULT FALSE"
+                            "last_air_date": "DATE",
+                            "backdrop_path": "TEXT",  
+                            "homepage": "TEXT", 
+                            "production_companies_json": "JSONB",
+                            "networks_json": "JSONB"
                         },
                         'resubscribe_rules': {
-                            "scope_rules": "JSONB DEFAULT '[]'::jsonb",
-                            "resubscribe_subtitle_effect_only": "BOOLEAN DEFAULT FALSE",
-                            "resubscribe_filesize_enabled": "BOOLEAN DEFAULT FALSE",
-                            "resubscribe_filesize_operator": "TEXT DEFAULT 'lt'",
-                            "resubscribe_filesize_threshold_gb": "REAL DEFAULT 10.0",
-                            "resubscribe_codec_enabled": "BOOLEAN DEFAULT FALSE",
-                            "resubscribe_codec_include": "JSONB",
-                            "resubscribe_subtitle_skip_if_audio_exists": "BOOLEAN DEFAULT FALSE",
-                            "auto_resubscribe": "BOOLEAN DEFAULT FALSE",
-                            "custom_resubscribe_enabled": "BOOLEAN DEFAULT FALSE",
-                            "consistency_check_enabled": "BOOLEAN DEFAULT FALSE",
-                            "consistency_must_match_resolution": "BOOLEAN DEFAULT FALSE", 
-                            "consistency_must_match_group": "BOOLEAN DEFAULT FALSE",
-                            "consistency_must_match_codec": "BOOLEAN DEFAULT FALSE",
-                            "rule_type": "TEXT DEFAULT 'resubscribe'",           
-                            "filter_rating_enabled": "BOOLEAN DEFAULT FALSE",    
-                            "filter_rating_min": "REAL DEFAULT 0",               
-                            "delete_mode": "TEXT DEFAULT 'episode'",             
-                            "delete_delay_seconds": "INTEGER DEFAULT 0",  
-                            "filter_rating_ignore_zero": "BOOLEAN DEFAULT FALSE",
                             "filter_missing_episodes_enabled": "BOOLEAN DEFAULT FALSE",
+                            "resubscribe_source": "TEXT DEFAULT 'moviepilot'", 
+                            "resubscribe_entire_season": "BOOLEAN DEFAULT FALSE",
                         },
                         'collections_info': {
                             "poster_path": "TEXT",
@@ -566,7 +527,8 @@ def init_db():
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_genres_gin ON media_metadata USING GIN(genres_json jsonb_path_ops);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_tags_gin ON media_metadata USING GIN(tags_json jsonb_path_ops);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_countries_gin ON media_metadata USING GIN(countries_json jsonb_path_ops);")
-                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_studios_gin ON media_metadata USING GIN(studios_json jsonb_path_ops);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_companies_gin ON media_metadata USING GIN(production_companies_json jsonb_path_ops);")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_networks_gin ON media_metadata USING GIN(networks_json jsonb_path_ops);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_keywords_gin ON media_metadata USING GIN(keywords_json jsonb_path_ops);")
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_asset_details_gin ON media_metadata USING GIN(asset_details_json);")
 
@@ -583,6 +545,12 @@ def init_db():
                     # 11. 【跟播系统】加速“正在连载”剧集的筛选
                     cursor.execute("CREATE INDEX IF NOT EXISTS idx_mm_watchlist_airing ON media_metadata (watchlist_is_airing) WHERE item_type = 'Series';")
 
+                    # 12. 【115 目录缓存】加速本地目录树查找
+                    # 加速 "列出某目录下的所有文件"
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_parent_id ON p115_filesystem_cache (parent_id);")
+                    # 加速 "全局搜索某个文件"
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_p115_name ON p115_filesystem_cache (name);")
+
                 except Exception as e_index:
                     logger.error(f"  ➜ 创建索引时出错: {e_index}", exc_info=True)
                 logger.trace("  ➜ 数据库升级检查完成。")
@@ -596,12 +564,7 @@ def init_db():
                     # --- 3.1 清理废弃的表 ---
                     deprecated_tables = [
                         'watchlist',
-                        'tracked_actor_media',
-                        'subscription_requests',
-                        'media_cleanup_tasks',
-                        'resubscribe_cache',
-                        'user_collection_cache',
-                        'users'
+                        'tracked_actor_media'
                     ]
                     for table in deprecated_tables:
                         logger.trace(f"    ➜ [数据库清理] 正在尝试移除废弃的表: '{table}'...")
@@ -611,44 +574,21 @@ def init_db():
                     # ★★★ 核心修复：使用字典来管理多个表的废弃列 ★★★
                     deprecated_columns_map = {
                         'media_metadata': [
-                            'emby_item_id',
-                            'emby_children_details_json',
-                            'pre_cached_tags_json',
-                            'paths_json',
-                            'backdrop_path',
-                            'vote_count',
-                            'popularity',
-                            'imdb_id',
-                            'tvdb_id',
-                            'pre_processed_at',
-                            'pre_cached_extra_json',
-                            'translated_title',
-                            'translated_overview',
-                            'tmdb_status',
-                            'next_episode_to_air_json',
-                            'is_airing',
-                            'total_seasons',
-                            'rating_locked'
+                            'emby_item_id'
                         ],
                         'cleanup_index': [
                             'best_version_id'
                         ],
                         'collections_info': [
-                            'status', 
-                            'has_missing', 
-                            'missing_movies_json', 
-                            'in_library_count'
+                            'status'
                         ],
                         'resubscribe_rules': [
                             'target_library_ids',
-                            'target_genres',
-                            'target_countries'
+                            'delete_after_resubscribe',
+                            'auto_resubscribe'
                         ],
                         'custom_collections': [
-                            'missing_count',
-                            'health_status',
-                            'poster_path',
-                            'generated_emby_ids_json' # <-- 在这里添加了废弃的列！
+                            'missing_count'
                         ]
                     }
 

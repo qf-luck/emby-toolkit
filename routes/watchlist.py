@@ -276,12 +276,11 @@ def api_watchlist_settings():
             "default_total_episodes": 99 
         },
         "auto_pause": 0,
+        "douban_count_correction": False,
         "auto_resub_ended": False,
-        "auto_delete_old_files": False, 
-        "auto_delete_old_files": False,     
+        "auto_delete_old_files": False,
         "auto_delete_mp_history": False,     
         "auto_delete_download_tasks": False,
-        "gap_fill_resubscribe": False,
         "enable_backfill": False,
         "sync_mp_subscription": False,  
         "revival_check_days": 365      

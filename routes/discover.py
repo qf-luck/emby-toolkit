@@ -8,6 +8,8 @@ from utils import DEFAULT_KEYWORD_MAPPING, DEFAULT_STUDIO_MAPPING, contains_chin
 from database import media_db, settings_db, request_db
 from tasks.discover import task_update_daily_theme, task_replenish_recommendation_pool
 import task_manager
+import config_manager
+import constants
 
 discover_bp = Blueprint('discover_bp', __name__, url_prefix='/api/discover')
 logger = logging.getLogger(__name__)
@@ -638,6 +640,19 @@ def trigger_recommendation_update():
         logger.error(f"自动触发每日推荐任务时失败: {e}", exc_info=True)
         return jsonify({"error": "启动任务失败"}), 500
     
+@discover_bp.route('/tmdb/tv/<int:tv_id>', methods=['GET'])
+@any_login_required
+def get_tmdb_tv_details_proxy(tv_id):
+    """获取 TMDb 剧集季列表"""
+    api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+    try:
+        # 只需要基础信息和季列表，不需要 credits 等重数据
+        details = tmdb.get_tv_details(tv_id, api_key, append_to_response=None)
+        return jsonify(details)
+    except Exception as e:
+        logger.error(f"获取 TMDb TV 详情失败: {e}")
+        return jsonify({"error": str(e)}), 500
+
 def check_and_replenish_pool():
     """
     【V2 - 修正版】

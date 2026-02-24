@@ -18,6 +18,7 @@ from typing import Dict, Any
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 import atexit # 用于应用退出处理
+from ai_translator import AITranslator
 from core_processor import MediaProcessor
 from actor_subscription_processor import ActorSubscriptionProcessor
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -49,6 +50,7 @@ from routes.unified_auth import unified_auth_bp
 from routes.user_portal import user_portal_bp
 from routes.discover import discover_bp
 from routes.nullbr import nullbr_bp
+from routes.p115 import p115_bp
 # --- 核心模块导入 ---
 import constants # 你的常量定义\
 import logging
@@ -59,7 +61,15 @@ from database import connection, settings_db
 import task_manager
 # ★★★ 新增：导入监控服务 ★★★
 from monitor_service import MonitorService 
-
+# 导入 DoubanApi
+try:
+    from handler.douban import DoubanApi
+    DOUBAN_API_AVAILABLE = True
+except ImportError:
+    DOUBAN_API_AVAILABLE = False
+    class DoubanApi:
+        def __init__(self, *args, **kwargs): pass
+        def close(self): pass
 # --- 核心模块导入结束 ---
 logger = logging.getLogger(__name__)
 logging.getLogger("apscheduler.scheduler").setLevel(logging.WARNING)
@@ -140,6 +150,44 @@ def initialize_processors():
     current_config = config_manager.APP_CONFIG.copy()
 
     # --- 1. 创建实例并存储在局部变量中 ---
+
+    # --- 初始化共享的 AI 实例 ---
+    shared_ai_translator = None
+    
+    # 检查是否开启了任意 AI 功能
+    ai_enabled = any([
+        current_config.get(constants.CONFIG_OPTION_AI_TRANSLATE_ACTOR_ROLE, False),
+        current_config.get(constants.CONFIG_OPTION_AI_TRANSLATE_TITLE, False),    
+        current_config.get(constants.CONFIG_OPTION_AI_TRANSLATE_OVERVIEW, False), 
+        current_config.get(constants.CONFIG_OPTION_AI_TRANSLATE_EPISODE_OVERVIEW, False),
+        current_config.get(constants.CONFIG_OPTION_AI_VECTOR, False),
+    ])
+
+    if ai_enabled:
+        try:
+            shared_ai_translator = AITranslator(current_config)
+            logger.debug("  ✅ AI增强服务实例已初始化。")
+        except Exception as e:
+            logger.error(f"  ❌ AITranslator 初始化失败: {e}")
+
+    # --- 初始化共享的 Douban 实例 ---
+    shared_douban_api = None
+    if getattr(constants, 'DOUBAN_API_AVAILABLE', False):
+        try:
+            # 从配置中获取参数
+            douban_cooldown = current_config.get(constants.CONFIG_OPTION_DOUBAN_DEFAULT_COOLDOWN, 2.0)
+            douban_cookie = current_config.get(constants.CONFIG_OPTION_DOUBAN_COOKIE, "")
+            
+            if not douban_cookie:
+                logger.debug(f"配置文件中未找到 '{constants.CONFIG_OPTION_DOUBAN_COOKIE}'。豆瓣功能可能受限。")
+            
+            shared_douban_api = DoubanApi(
+                cooldown_seconds=douban_cooldown,
+                user_cookie=douban_cookie
+            )
+            logger.debug("  ✅ DoubanApi 共享实例已初始化。")
+        except Exception as e:
+            logger.error(f"DoubanApi 初始化失败: {e}", exc_info=True)
     
     # 初始化 server_id_local
     server_id_local = None
@@ -177,7 +225,11 @@ def initialize_processors():
 
     # 初始化 media_processor_instance_local
     try:
-        media_processor_instance_local = MediaProcessor(config=current_config)
+        media_processor_instance_local = MediaProcessor(
+            config=current_config, 
+            ai_translator=shared_ai_translator,
+            douban_api=shared_douban_api 
+        )
         logger.trace("  ->核心处理器 实例已创建/更新。")
     except Exception as e:
         logger.error(f"创建 MediaProcessor 实例失败: {e}", exc_info=True)
@@ -185,7 +237,11 @@ def initialize_processors():
 
     # 初始化 watchlist_processor_instance_local
     try:
-        watchlist_processor_instance_local = WatchlistProcessor(config=current_config)
+        watchlist_processor_instance_local = WatchlistProcessor(
+            config=current_config, 
+            ai_translator=shared_ai_translator,
+            douban_api=shared_douban_api
+        )
         logger.trace("WatchlistProcessor 实例已成功初始化。")
     except Exception as e:
         logger.error(f"创建 WatchlistProcessor 实例失败: {e}", exc_info=True)
@@ -237,13 +293,11 @@ def ensure_nginx_config():
         # 2. 从 APP_CONFIG 获取值
         emby_url = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_EMBY_SERVER_URL, "")
         nginx_listen_port = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_PORT, 8097)
-        redirect_url = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_302_REDIRECT_URL, "")
 
         # 3. 准备替换值
         emby_upstream = emby_url.replace("http://", "").replace("https://", "").rstrip('/')
         # ★★★ 核心修改 2: Nginx 和 Python 代理在同一容器内，使用 localhost 通信 ★★★
         proxy_upstream = "127.0.0.1:7758" 
-        redirect_upstream = redirect_url.replace("http://", "").replace("https://", "").rstrip('/')
 
         if not emby_upstream:
             logger.error("config.ini 中未配置 Emby 服务器地址，无法生成 Nginx 配置！")
@@ -254,7 +308,6 @@ def ensure_nginx_config():
             'EMBY_UPSTREAM': emby_upstream,
             'PROXY_UPSTREAM': proxy_upstream,
             'NGINX_LISTEN_PORT': nginx_listen_port,
-            'REDIRECT_UPSTREAM': redirect_upstream,
             'NGINX_MAX_BODY_SIZE': '128m'
         }
         final_config_content = template.render(context)
@@ -367,6 +420,7 @@ app.register_blueprint(unified_auth_bp)
 app.register_blueprint(user_portal_bp)
 app.register_blueprint(discover_bp)
 app.register_blueprint(nullbr_bp)
+app.register_blueprint(p115_bp)
 
 def main_app_start():
     """将主应用启动逻辑封装成一个函数"""

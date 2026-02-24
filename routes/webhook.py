@@ -28,6 +28,11 @@ from services.cover_generator import CoverGeneratorService
 from database import custom_collection_db, tmdb_collection_db, settings_db, user_db, maintenance_db, media_db, queries_db, watchlist_db
 from database.log_db import LogDBManager
 from handler.tmdb import get_movie_details, get_tv_details
+from handler.p115_service import P115Service, SmartOrganizer, get_config
+try:
+    from p115client import P115Client
+except ImportError:
+    P115Client = None
 import logging
 logger = logging.getLogger(__name__)
 
@@ -523,7 +528,184 @@ def emby_webhook():
     # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
     # ★★★             魔法日志 - END             ★★★
     # ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
-    event_type = data.get("Event") if data else "未知事件"
+    event_type = data.get("Event") # Emby
+    mp_event_type = data.get("type") # MP
+    # ======================================================================
+    # ★★★ 处理神医插件的 deep.delete (深度删除) 事件 ★★★
+    # ======================================================================
+    if event_type == "deep.delete":
+        logger.info("  💀 收到神医助手深度删除通知，准备执行清理流程...")
+        
+        item_from_webhook = data.get("Item", {})
+        original_item_id = item_from_webhook.get("Id")
+        original_item_type = item_from_webhook.get("Type")
+        original_item_name = item_from_webhook.get("Name", "未知项目")
+        series_id_from_webhook = item_from_webhook.get("SeriesId") if original_item_type == "Episode" else None
+
+        # --------------------------------------------------------
+        # 任务 1: 清理本地数据库 (完全替代原 library.deleted)
+        # --------------------------------------------------------
+        if original_item_id and original_item_type:
+            try:
+                logger.info(f"  🧹 [深度删除] 开始清理本地数据库记录: {original_item_name}")
+                maintenance_db.cleanup_deleted_media_item(
+                    item_id=original_item_id,
+                    item_name=original_item_name,
+                    item_type=original_item_type,
+                    series_id_from_webhook=series_id_from_webhook
+                )
+                # 刷新向量缓存
+                if config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_ENABLED) and config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_AI_VECTOR):
+                    if original_item_type in ['Movie', 'Series']:
+                        spawn(RecommendationEngine.refresh_cache)
+                        logger.debug(f"  ➜ [智能推荐] 检测到媒体删除，已触发向量缓存刷新。")
+            except Exception as e:
+                logger.error(f"  ❌ [深度删除] 清理本地数据库失败: {e}", exc_info=True)
+
+        # --------------------------------------------------------
+        # 任务 2: 联动删除 115 网盘文件
+        # --------------------------------------------------------
+        nb_config = get_config()
+        if not nb_config.get(constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE, False):
+            logger.debug("  🚫 联动删除未开启，跳过网盘清理。")
+            return jsonify({"status": "processed_db_only"}), 200
+
+        description = data.get("Description", "")
+        if not description:
+            return jsonify({"status": "ignored_no_description"}), 200
+
+        try:
+            import re
+            path_match = re.search(r'Item Path:\n(.*?)\n\n', description)
+            item_path = path_match.group(1).strip() if path_match else ""
+
+            pickcodes = []
+            if "Mount Paths:\n" in description:
+                mount_paths_str = description.split("Mount Paths:\n")[-1]
+                urls = [line.strip() for line in mount_paths_str.split('\n') if line.strip()]
+                
+                for url in urls:
+                    pc_match = re.search(r'/api/p115/play/([a-zA-Z0-9]+)', url)
+                    if pc_match:
+                        pickcodes.append(pc_match.group(1))
+
+            if pickcodes and item_path:
+                logger.info(f"  🎯 成功提取到 {len(pickcodes)} 个 115 提取码，交由后台执行联动删除。")
+                from handler.p115_service import delete_115_files_by_webhook
+                spawn(delete_115_files_by_webhook, item_path, pickcodes)
+                return jsonify({"status": "deep_delete_task_started"}), 202
+            else:
+                logger.warning("  ⚠️ 深度删除通知中未找到有效的 ETK 直链或路径，跳过网盘清理。")
+                return jsonify({"status": "processed_db_only_no_pickcodes"}), 200
+
+        except Exception as e:
+            logger.error(f"  ❌ 解析深度删除通知失败: {e}", exc_info=True)
+            return jsonify({"status": "error_parsing_deep_delete"}), 500
+    # ======================================================================
+    # ★★★ 处理 MoviePilot transfer.complete 事件 ★★★
+    # ======================================================================
+    if mp_event_type == "transfer.complete":
+        # 1. 检查配置是否开启了智能整理
+        nb_config = get_config()
+        if not nb_config.get(constants.CONFIG_OPTION_115_ENABLE_ORGANIZE, False):
+            logger.debug("  🚫 智能整理未开启，忽略 MP 通知。")
+            return jsonify({"status": "ignored_smart_organize_disabled"}), 200
+        else:
+            logger.info("  📥 收到 MoviePilot 上传完成通知，开始接管整理...")
+
+        # 2. 提取关键数据
+        try:
+            transfer_info = data.get("data", {}).get("transferinfo", {})
+            media_info = data.get("data", {}).get("mediainfo", {})
+            
+            # 115 文件 ID 和 文件名
+            target_item = transfer_info.get("target_item", {})
+            file_id = target_item.get("fileid")
+            pc = target_item.get("pickcode") 
+            
+            # 115 当前父目录 ID (MP 创建的临时目录)
+            target_dir = transfer_info.get("target_diritem", {})
+            current_parent_cid = target_dir.get("fileid")
+            
+            # 元数据
+            tmdb_id = media_info.get("tmdb_id")
+            media_type_cn = media_info.get("type") 
+            title = media_info.get("title")
+            
+            if not file_id or not tmdb_id:
+                logger.warning("  ⚠️ MP 通知缺少 fileid 或 tmdb_id，无法处理。")
+                return jsonify({"status": "ignored_missing_data"}), 200
+
+            # 转换媒体类型
+            media_type = 'tv' if media_type_cn == '电视剧' else 'movie'
+            
+            # 3. 获取共享 115 客户端
+            client = P115Service.get_client()
+            if not client:
+                return jsonify({"status": "error_no_p115_client"}), 500
+                
+            # 4. 初始化智能整理器
+            organizer = SmartOrganizer(client, tmdb_id, media_type, title)
+            
+            # 5. 计算目标分类 CID
+            target_cid = organizer.get_target_cid()
+            
+            if target_cid:
+                logger.info(f"  🚀 [MP上传] 新文件: {target_item.get('name')} (文件大小: {int(target_item.get('size', 0))/1024/1024/1024:.2f} GB)")
+                
+                # 构造真实的文件对象 (模拟 115 API 返回的结构)
+                real_root_item = {
+                    'n': target_item.get("name"),
+                    's': target_item.get("size"), # 直接用 MP 给的大小
+                    'cid': current_parent_cid,    # 父目录 ID
+                    'fid': file_id,                # ★★★ 关键：必须有 fid，execute 才会认为是单文件模式 ★★★
+                    'pc': pc
+                }
+                
+                # 双重保险：如果 MP 传的是文件夹 (type=0)，则移除 fid
+                # 但通常 MP 转存的都是视频文件，这里为了防止万一
+                if str(target_item.get("type")) == "0":
+                    logger.warning("  ⚠️ 检测到 MP 上传的是文件夹，这可能会导致递归扫描，请谨慎！")
+                    del real_root_item['fid']
+                    real_root_item['cid'] = file_id # 文件夹自己的 ID
+
+                # logger.info(f"  🚀 [MP上传] 转交 SmartOrganizer.execute 处理...")
+                # 复用 execute 逻辑
+                success = organizer.execute(real_root_item, target_cid, webhook=True)
+                
+                if success:
+                    # 强制删除 MP 临时目录
+                    if current_parent_cid and str(current_parent_cid) != '0':
+                        try:
+                            # 检查目录创建时间，防止误删正在上传的剧集目录
+                            should_delete = True
+                            try:
+                                if media_type == 'tv':
+                                    logger.info(f"  🛡️ [MP上传] 检测到是剧集，跳过立即删除临时目录，交由定时任务处理。")
+                                    should_delete = False
+                                    
+                            except Exception:
+                                pass
+
+                            if should_delete:
+                                logger.debug(f"  🧹 [MP上传] 删除临时目录")
+                                client.fs_delete([current_parent_cid])
+                                
+                        except Exception as e:
+                            logger.warning(f"  ⚠️ 清理临时目录失败: {e}")
+
+                    return jsonify({"status": "success_organized"}), 200
+                else:
+                    return jsonify({"status": "failed_organize"}), 500
+
+            else:
+                logger.info("  🚫 [MP上传] 未命中任何分类规则，保持原样。")
+                return jsonify({"status": "ignored_no_rule_match"}), 200
+
+        except Exception as e:
+            logger.error(f"  ❌ [MP上传] 处理失败: {e}", exc_info=True)
+            return jsonify({"status": "error", "message": str(e)}), 500
+        
     logger.debug(f"  ➜ 收到Emby Webhook: {event_type}")
 
     USER_DATA_EVENTS = [
@@ -667,7 +849,7 @@ def emby_webhook():
             logger.error(f"  ➜ 通过 Webhook 更新用户媒体数据时失败: {e}", exc_info=True)
             return jsonify({"status": "error_updating_user_data"}), 500
 
-    trigger_events = ["item.add", "library.new", "library.deleted", "metadata.update", "image.update", "collection.items.removed"]
+    trigger_events = ["item.add", "library.new", "metadata.update", "image.update", "collection.items.removed", "deep.delete", "None"]
     if event_type not in trigger_events:
         logger.debug(f"  ➜ Webhook事件 '{event_type}' 不在触发列表 {trigger_events} 中，将被忽略。")
         return jsonify({"status": "event_ignored_not_in_trigger_list"}), 200
@@ -729,35 +911,6 @@ def emby_webhook():
             )
             return jsonify({"status": "collection_removal_check_started"}), 202
 
-    if event_type == "library.deleted":
-            if config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_MONITOR_ENABLED):
-                logger.debug(f"  ➜ Webhook: 忽略 'library.deleted' 事件 (实时监控已启用，由监控模块接管清理)。")
-                return jsonify({"status": "ignored_monitor_active"}), 200
-            try:
-                series_id_from_webhook = item_from_webhook.get("SeriesId") if original_item_type == "Episode" else None
-                # 直接调用新的、干净的数据库函数
-                maintenance_db.cleanup_deleted_media_item(
-                    item_id=original_item_id,
-                    item_name=original_item_name,
-                    item_type=original_item_type,
-                    series_id_from_webhook=series_id_from_webhook
-                )
-                # ==============================================================
-                # ★★★ 删除媒体后，也主动刷新向量缓存 (保持缓存纯净) ★★★
-                # ==============================================================
-                if config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_ENABLED) and config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_AI_VECTOR):
-                    # 只有删除了 Movie 或 Series 才需要刷新，删 Episode 不影响向量库
-                    if original_item_type in ['Movie', 'Series']:
-                        try:
-                            spawn(RecommendationEngine.refresh_cache)
-                            logger.debug(f"  ➜ [智能推荐] 检测到媒体删除，已触发向量缓存刷新。")
-                        except Exception as e:
-                            logger.warning(f"  ➜ [智能推荐] 触发缓存刷新失败: {e}")
-                # ==============================================================
-                return jsonify({"status": "delete_event_processed"}), 200
-            except Exception as e:
-                logger.error(f"处理删除事件 for item {original_item_id} 时发生错误: {e}", exc_info=True)
-                return jsonify({"status": "error_processing_remove_event", "error": str(e)}), 500
     # 过滤不在处理范围的媒体库
     if event_type in ["item.add", "library.new", "metadata.update", "image.update"]:
         processor = extensions.media_processor_instance

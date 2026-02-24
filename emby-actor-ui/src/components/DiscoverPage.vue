@@ -321,8 +321,32 @@
       已经到底啦~
     </div>
 
-    <!-- ★★★ 核心改造 1: 添加 IntersectionObserver 的“哨兵”元素 ★★★ -->
     <div ref="sentinel" style="height: 50px;"></div>
+    <!-- 季选择模态框 -->
+    <n-modal v-model:show="showSeasonModal" preset="card" title="选择要搜索的季" style="width: 400px; max-width: 90%;">
+      <n-spin :show="loadingSeasons">
+        <div v-if="seasonList.length === 0 && !loadingSeasons" style="text-align: center; color: #888; padding: 20px;">
+          未找到季信息，将搜索整剧
+          <div style="margin-top: 10px;">
+             <n-button size="small" @click="selectSeasonAndSearch(null)">直接搜索整剧</n-button>
+          </div>
+        </div>
+        
+        <n-space vertical v-else>
+          <n-button 
+            v-for="season in seasonList" 
+            :key="season.id" 
+            block 
+            secondary
+            style="justify-content: space-between; height: auto; padding: 10px;"
+            @click="selectSeasonAndSearch(season)"
+          >
+            <span>{{ season.name }}</span>
+            <n-tag size="small" :bordered="false" type="info">{{ season.episode_count }} 集</n-tag>
+          </n-button>
+        </n-space>
+      </n-spin>
+    </n-modal>
     <NullbrSearchModal ref="nullbrModalRef" />
   </div>
   </n-layout>
@@ -338,7 +362,7 @@ import {
   NInputNumber, NSpin, NGrid, NGi, NButton, NThing, useMessage, NIcon, 
   NInput, NInputGroup, NSkeleton, NEllipsis, NEmpty, NDivider, NH4, NH3, NTooltip
 } from 'naive-ui';
-import NullbrSearchModal from './NullbrSearchModal.vue';
+import NullbrSearchModal from './modals/NullbrSearchModal.vue';
 import { Heart, HeartOutline, HourglassOutline, Star as StarIcon, FlashOutline as LightningIcon, DiceOutline as DiceIcon, CloudDownloadOutline as CloudDownloadIcon } from '@vicons/ionicons5';
 
 // ... (所有顶部的 import 和 ref 定义保持不变) ...
@@ -404,26 +428,76 @@ const isLoadingMore = ref(false);
 const searchQuery = ref('');
 const isSearchMode = computed(() => searchQuery.value.trim() !== '');
 const sentinel = ref(null);
-// ★★★ 新增：移动端检测逻辑 ★★★
+const showSeasonModal = ref(false);
+const loadingSeasons = ref(false);
+const seasonList = ref([]);
+const currentSeriesForSearch = ref(null);
 const isMobile = ref(false);
 const checkMobile = () => {
   isMobile.value = window.innerWidth < 768;
 };
 const nullbrModalRef = ref(null);
 
-const handleNullbrSearch = (media) => {
+const handleNullbrSearch = async (media) => {
+  // 1. 如果是电影，直接打开搜索，不需要选季
+  if (media.media_type === 'movie' || mediaType.value === 'movie') {
+    if (nullbrModalRef.value) {
+      nullbrModalRef.value.open({
+        tmdb_id: media.id,
+        title: media.title || media.name,
+        media_type: 'movie'
+      });
+    }
+    return;
+  }
+
+  // 2. 如果是剧集，先弹出季选择框
+  currentSeriesForSearch.value = media;
+  showSeasonModal.value = true;
+  loadingSeasons.value = true;
+  seasonList.value = [];
+
+  try {
+    // 调用刚才在后端新增的接口
+    const res = await axios.get(`/api/discover/tmdb/tv/${media.id}`);
+    
+    if (res.data && res.data.seasons) {
+      // 过滤掉第0季(特别篇)，并按季号排序
+      seasonList.value = res.data.seasons
+        .filter(s => s.season_number > 0)
+        .sort((a, b) => a.season_number - b.season_number);
+    }
+  } catch (e) {
+    message.warning("获取季信息失败，请尝试直接搜索");
+    seasonList.value = [];
+  } finally {
+    loadingSeasons.value = false;
+  }
+};
+
+// ★★★ 新增：选中季后触发搜索 ★★★
+const selectSeasonAndSearch = (season) => {
+  showSeasonModal.value = false;
+  
+  if (!currentSeriesForSearch.value) return;
+  
   if (nullbrModalRef.value) {
-    // 构造符合 NullbrSearchModal 要求的对象
-    // DiscoverPage 的 media 对象通常有 id, title/name, media_type
     const item = {
-      tmdb_id: media.id,
-      title: media.title || media.name,
-      // 这里的 media_type 可能是 'movie' 或 'tv'，直接传即可，组件内部会处理
-      media_type: media.media_type || mediaType.value 
+      tmdb_id: currentSeriesForSearch.value.id,
+      title: currentSeriesForSearch.value.name,
+      media_type: 'tv',
+      // ★ 关键：如果选了季，传入 season_number；没选(null)则不传
+      season_number: season ? season.season_number : null 
     };
+    
+    // 如果是整剧搜索(season为null)，title保持原样
+    // 如果是分季搜索，NullbrSearchModal 内部会处理，或者我们在这里也可以拼一下 title 方便显示
+    // 但 NullbrSearchModal 内部逻辑是：有 season_number 就搜分季接口
+    
     nullbrModalRef.value.open(item);
   }
 };
+
 const studioLabel = computed(() => {
   return mediaType.value === 'movie' ? '出品公司' : '播出平台';
 });

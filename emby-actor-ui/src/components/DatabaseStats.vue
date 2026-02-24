@@ -180,11 +180,25 @@
                 </n-grid>
               </div>
               <n-divider />
-              <n-grid :cols="3" :x-gap="12" class="quota-grid">
-                <n-gi class="quota-label-container"><span>订阅配额</span></n-gi>
-                <n-gi class="stat-block"><div class="stat-item"><div class="stat-item-label">今日已用</div><div class="stat-item-value">{{ stats.subscriptions_card.quota.consumed }}</div></div></n-gi>
-                <n-gi class="stat-block"><div class="stat-item"><div class="stat-item-label">今日剩余</div><div class="stat-item-value">{{ stats.subscriptions_card.quota.available }}</div></div></n-gi>
-              </n-grid>
+              <!-- MP 配额 -->
+                <n-grid :cols="3" :x-gap="12" class="quota-grid">
+                  <n-gi class="quota-label-container">
+                    <n-icon size="18" color="#18a058" style="margin-right: 6px"><CheckIcon /></n-icon>
+                    <span>MP 订阅配额</span>
+                  </n-gi>
+                  <n-gi class="stat-block"><div class="stat-item"><div class="stat-item-label">今日已用</div><div class="stat-item-value">{{ stats.subscriptions_card.quota.mp.consumed }}</div></div></n-gi>
+                  <n-gi class="stat-block"><div class="stat-item"><div class="stat-item-label">今日剩余</div><div class="stat-item-value">{{ stats.subscriptions_card.quota.mp.available }}</div></div></n-gi>
+                </n-grid>
+                
+                <!-- NULLBR 配额 -->
+                <n-grid :cols="3" :x-gap="12" class="quota-grid" style="margin-top: 12px;">
+                  <n-gi class="quota-label-container">
+                    <n-icon size="18" color="#f0a020" style="margin-right: 6px"><FlashIcon /></n-icon>
+                    <span>NULLBR 配额</span>
+                  </n-gi>
+                  <n-gi class="stat-block"><div class="stat-item"><div class="stat-item-label">今日已用</div><div class="stat-item-value">{{ stats.subscriptions_card.quota.nullbr.consumed }}</div></div></n-gi>
+                  <n-gi class="stat-block"><div class="stat-item"><div class="stat-item-label">今日剩余</div><div class="stat-item-value">{{ stats.subscriptions_card.quota.nullbr.available }}</div></div></n-gi>
+                </n-grid>
               <n-divider />
   
               <!-- 发布组统计区 -->
@@ -361,8 +375,12 @@
           </div>
           <n-divider style="margin: 8px 0" />
           <div class="mobile-row">
-            <span>今日配额</span>
-            <span>{{ stats.subscriptions_card.quota.consumed }} 用 / {{ stats.subscriptions_card.quota.available }} 余</span>
+            <span>MP 配额</span>
+            <span>{{ stats.subscriptions_card.quota.mp.consumed }} 用 / {{ stats.subscriptions_card.quota.mp.available }} 余</span>
+          </div>
+          <div class="mobile-row">
+            <span>NULLBR 配额</span>
+            <span>{{ stats.subscriptions_card.quota.nullbr.consumed }} 用 / {{ stats.subscriptions_card.quota.nullbr.available }} 余</span>
           </div>
         </n-space>
       </n-card>
@@ -392,7 +410,8 @@ import {
   NProgress, NEmpty, useThemeVars, NTag
 } from 'naive-ui';
 // 引入所有需要的图标
-import { PersonOutline, FilmOutline, TvOutline, LayersOutline } from '@vicons/ionicons5';
+import { PersonOutline, FilmOutline, TvOutline, LayersOutline, CheckmarkCircleOutline as CheckIcon,
+  FlashOutline as FlashIcon } from '@vicons/ionicons5';
 import { use } from 'echarts/core';
 import { CanvasRenderer } from 'echarts/renderers';
 import { PieChart } from 'echarts/charts';
@@ -421,7 +440,10 @@ const stats = reactive({
     resubscribe: { pending: 0 },
     native_collections: { total: 0, count: 0, missing_items: 0 },
     custom_collections: { total: 0, count: 0, missing_items: 0 },
-    quota: { available: 0, consumed: 0 }
+    quota: { 
+      mp: { available: 0, consumed: 0 },
+      nullbr: { available: 0, consumed: 0, total: 0 }
+    }
   },
   release_group_ranking: [],
   historical_release_group_ranking: []

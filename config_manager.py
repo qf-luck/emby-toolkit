@@ -72,7 +72,6 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_PROXY_MERGE_NATIVE: (constants.CONFIG_SECTION_REVERSE_PROXY, 'boolean', True),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_SELECTION: (constants.CONFIG_SECTION_REVERSE_PROXY, 'list', []),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER: (constants.CONFIG_SECTION_REVERSE_PROXY, 'str', 'before'),
-    constants.CONFIG_OPTION_PROXY_302_REDIRECT_URL: (constants.CONFIG_SECTION_REVERSE_PROXY, 'string', ""),
     constants.CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER: (constants.CONFIG_SECTION_REVERSE_PROXY, 'str', 'before'),
     constants.CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS: (constants.CONFIG_SECTION_REVERSE_PROXY, 'boolean', False),
 
@@ -92,7 +91,6 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_MOVIEPILOT_URL: (constants.CONFIG_SECTION_MOVIEPILOT, 'string', ""),
     constants.CONFIG_OPTION_MOVIEPILOT_USERNAME: (constants.CONFIG_SECTION_MOVIEPILOT, 'string', ""),
     constants.CONFIG_OPTION_MOVIEPILOT_PASSWORD: (constants.CONFIG_SECTION_MOVIEPILOT, 'string', ""),
-    constants.CONFIG_OPTION_AUTOSUB_ENABLED: (constants.CONFIG_SECTION_MOVIEPILOT, 'boolean', False),
     constants.CONFIG_OPTION_RESUBSCRIBE_DAILY_CAP: (constants.CONFIG_SECTION_MOVIEPILOT, 'int', 200),
     constants.CONFIG_OPTION_RESUBSCRIBE_DELAY_SECONDS: (constants.CONFIG_SECTION_MOVIEPILOT, 'float', 1.5),
     
@@ -103,6 +101,25 @@ DYNAMIC_CONFIG_DEF = {
     constants.CONFIG_OPTION_MONITOR_SCAN_LOOKBACK_DAYS: (constants.CONFIG_SECTION_MONITOR, 'int', constants.DEFAULT_MONITOR_SCAN_LOOKBACK_DAYS),
     constants.CONFIG_OPTION_MONITOR_EXCLUDE_DIRS: (constants.CONFIG_SECTION_MONITOR, 'list', constants.DEFAULT_MONITOR_EXCLUDE_DIRS),
     constants.CONFIG_OPTION_MONITOR_EXCLUDE_REFRESH_DELAY: (constants.CONFIG_SECTION_MONITOR, 'int', constants.DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY),
+
+    # [115] 
+    constants.CONFIG_OPTION_115_COOKIES: (constants.CONFIG_SECTION_115, 'string', ""),
+    constants.CONFIG_OPTION_115_SAVE_PATH_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
+    constants.CONFIG_OPTION_115_SAVE_PATH_NAME: (constants.CONFIG_SECTION_115, 'string', "根目录"),
+    constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: (constants.CONFIG_SECTION_115, 'string', "根目录"),
+    constants.CONFIG_OPTION_115_INTERVAL: (constants.CONFIG_SECTION_115, 'float', 5.0),
+    constants.CONFIG_OPTION_115_ENABLE_ORGANIZE: (constants.CONFIG_SECTION_115, 'boolean', False),
+    constants.CONFIG_OPTION_115_EXTENSIONS: (constants.CONFIG_SECTION_115, 'list', [
+        'mp4', 'mkv', 'avi', 'ts', 'iso', 'mov', 'm2ts', 
+        'srt', 'ass', 'ssa'
+    ]),
+    constants.CONFIG_OPTION_115_MEDIA_ROOT_CID: (constants.CONFIG_SECTION_115, 'string', "0"),
+    constants.CONFIG_OPTION_115_MEDIA_ROOT_NAME: (constants.CONFIG_SECTION_115, 'string', "媒体库"),
+    constants.CONFIG_OPTION_LOCAL_STRM_ROOT: (constants.CONFIG_SECTION_115, 'string', "/mnt/media"),
+    constants.CONFIG_OPTION_ETK_SERVER_URL: (constants.CONFIG_SECTION_115, 'string', "http://192.168.1.X:5257"),
+    constants.CONFIG_OPTION_115_ENABLE_SYNC_DELETE: (constants.CONFIG_SECTION_115, 'boolean', False),
+    constants.CONFIG_OPTION_115_DOWNLOAD_SUBS: (constants.CONFIG_SECTION_115, 'boolean', True),
+    constants.CONFIG_OPTION_115_LOCAL_CLEANUP: (constants.CONFIG_SECTION_115, 'boolean', False),
 
     # [LocalDataSource]
     constants.CONFIG_OPTION_LOCAL_DATA_PATH: (constants.CONFIG_SECTION_LOCAL_DATA, 'string', ""),

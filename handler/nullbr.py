@@ -1,29 +1,31 @@
 # handler/nullbr.py
 import logging
 import requests
+import threading
 import re
 import time  
-import threading 
 from datetime import datetime
 from database import settings_db, media_db, request_db
 import config_manager
 
 import constants
 import utils
-try:
-    # 只导入主类，不导入工具类，防止报错
-    from p115client import P115Client
-except ImportError:
-    P115Client = None
+import handler.tmdb as tmdb
+from handler.p115_service import P115Service, SmartOrganizer, logger
 
 logger = logging.getLogger(__name__)
 
-# ★★★ 硬编码配置：Nullbr ★★★
+# 硬编码配置：Nullbr 
 NULLBR_APP_ID = "7DqRtfNX3"
 NULLBR_API_BASE = "https://api.nullbr.com"
 
-# 线程锁，防止并发请求导致计数器错乱
-_rate_limit_lock = threading.Lock()
+# 内存缓存，用于存储用户等级以控制请求频率，避免每次都查库
+_user_level_cache = {
+    "sub_name": "free",
+    "daily_used": 0,
+    "daily_quota": 0,
+    "updated_at": 0
+}
 
 def get_config():
     return settings_db.get_setting('nullbr_config') or {}
@@ -41,250 +43,257 @@ def _get_headers():
     return headers
 
 def _parse_size_to_gb(size_str):
-    """将大小字符串 (如 '83.03 GB', '500 MB') 转换为 GB (float)"""
-    if not size_str:
-        return 0.0
-    
+    """将大小字符串转换为 GB (float)"""
+    if not size_str: return 0.0
     size_str = size_str.upper().replace(',', '')
     match = re.search(r'([\d\.]+)\s*(TB|GB|MB|KB)', size_str)
-    if not match:
-        return 0.0
-    
+    if not match: return 0.0
     num = float(match.group(1))
     unit = match.group(2)
-    
-    if unit == 'TB':
-        return num * 1024
-    elif unit == 'GB':
-        return num
-    elif unit == 'MB':
-        return num / 1024
-    elif unit == 'KB':
-        return num / 1024 / 1024
+    if unit == 'TB': return num * 1024
+    elif unit == 'GB': return num
+    elif unit == 'MB': return num / 1024
+    elif unit == 'KB': return num / 1024 / 1024
     return 0.0
 
-def _is_resource_valid(item, filters, media_type='movie'):
+def _is_resource_valid(item, filters, media_type='movie', episode_count=0):
     """根据配置过滤资源"""
     if not filters:
         return True
 
-    # 1. 分辨率过滤 (如果配置了列表，则必须在列表中)
+    # 1. 分辨率过滤
     allowed_resolutions = filters.get('resolutions', [])
     if allowed_resolutions:
         res = item.get('resolution')
-        # 如果资源没标分辨率，或者分辨率不在允许列表中，则过滤
         if not res or res not in allowed_resolutions:
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为分辨率 {res} 不在允许列表中")
             return False
 
-    # 2. 质量过滤 (只要包含其中一个关键词即可)
+    # 2. 质量过滤
     allowed_qualities = filters.get('qualities', [])
     if allowed_qualities:
         item_quality = item.get('quality')
-        # item_quality 可能是字符串也可能是列表
-        if not item_quality:
-            return False
-        
-        if isinstance(item_quality, str):
-            q_list = [item_quality]
-        else:
-            q_list = item_quality
-            
-        # 检查是否有交集
-        has_match = any(q in q_list for q in allowed_qualities)
-        if not has_match:
+        if not item_quality: return False
+        q_list = [item_quality] if isinstance(item_quality, str) else item_quality
+        if not any(q in q_list for q in allowed_qualities): 
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为质量 {item_quality} 不在允许列表中")
             return False
 
-    # 3. 大小过滤 (GB)
+    # 3. 大小过滤 (GB) 
+    min_size = 0.0
+    max_size = 0.0
+
     if media_type == 'tv':
-        # 如果配置了 tv_min_size，优先使用，否则回退到旧的 min_size (兼容旧配置)
-        min_size = float(filters.get('tv_min_size') or filters.get('min_size') or 0)
-        max_size = float(filters.get('tv_max_size') or filters.get('max_size') or 0)
+        # 优先取 tv_min_size，取不到(None)则尝试取 min_size，最后默认为 0
+        v_min = filters.get('tv_min_size')
+        if v_min is None: v_min = filters.get('min_size')
+        min_size = float(v_min or 0)
+
+        v_max = filters.get('tv_max_size')
+        if v_max is None: v_max = filters.get('max_size')
+        max_size = float(v_max or 0)
     else:
-        # 默认为电影
-        min_size = float(filters.get('movie_min_size') or filters.get('min_size') or 0)
-        max_size = float(filters.get('movie_max_size') or filters.get('max_size') or 0)
+        v_min = filters.get('movie_min_size')
+        if v_min is None: v_min = filters.get('min_size')
+        min_size = float(v_min or 0)
+
+        v_max = filters.get('movie_max_size')
+        if v_max is None: v_max = filters.get('max_size')
+        max_size = float(v_max or 0)
     
     if min_size > 0 or max_size > 0:
         size_gb = _parse_size_to_gb(item.get('size'))
-        if min_size > 0 and size_gb < min_size:
+        
+        # 计算检查用的数值
+        check_size = size_gb
+        
+        # 只有当是剧集、且成功获取到了集数、且集数大于0时，才计算平均大小
+        if media_type == 'tv' and episode_count > 0:
+            check_size = size_gb / episode_count
+            # 调试日志 (可选开启)
+            # logger.debug(f"  [大小检查] 总大小: {size_gb}G, 集数: {episode_count}, 平均: {check_size:.2f}G (限制: {min_size}-{max_size})")
+
+        if min_size > 0 and check_size < min_size:
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为大小 {check_size:.2f}G 小于最小限制 {min_size}G")
             return False
-        if max_size > 0 and size_gb > max_size:
+        if max_size > 0 and check_size > max_size:
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为大小 {check_size:.2f}G 大于最大限制 {max_size}G")
             return False
 
     # 4. 中字过滤
     if filters.get('require_zh'):
-        # 1. 优先看 API 返回的硬指标 (zh_sub: 1)
-        if item.get('is_zh_sub'):
-            return True
-            
-        # 2. API 没标记，尝试从标题猜测
+        if item.get('is_zh_sub'): return True
         title = item.get('title', '').upper()
-        
-        # 常见的中字/国语标识
-        zh_keywords = [
-            '中字', '中英', '字幕', 
-            'CHS', 'CHT', 'CN', 
-            'DIY', '国语', '国粤'
-        ]
-        
-        # 只要包含任意一个关键词即可
-        is_zh_guess = any(k in title for k in zh_keywords)
-        
-        if not is_zh_guess:
+        zh_keywords = ['中字', '中英', '字幕', 'CHS', 'CHT', 'CN', 'DIY', '国语', '国粤']
+        if not any(k in title for k in zh_keywords): 
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为未检测到中文字幕")
             return False
+            
 
-    # 5. 封装容器过滤 (后缀名)
+    # 5. 容器过滤
     allowed_containers = filters.get('containers', [])
     if allowed_containers:
-        # ★★★ 核心修复：如果是剧集 (TV)，通常是目录或合集，无法从标题判断容器，直接放行 ★★★
-        # 否则会导致文件夹形式的资源被误杀
-        if media_type == 'tv':
-            return True
-
+        if media_type == 'tv': return True
         title = item.get('title', '').lower()
-        # 检查标题结尾或链接结尾
         link = item.get('link', '').lower()
-        
-        # 提取扩展名逻辑简单版
         ext = None
-        if 'mkv' in title or link.endswith('.mkv'): ext = 'mkv'
-        elif 'mp4' in title or link.endswith('.mp4'): ext = 'mp4'
-        elif 'iso' in title or link.endswith('.iso'): ext = 'iso'
-        elif 'ts' in title or link.endswith('.ts'): ext = 'ts'
-        
-        if not ext or ext not in allowed_containers:
+
+        if link.startswith('ed2k://'):
+            # Ed2k 格式: ed2k://|file|文件名|大小|哈希|/
+            # 使用 | 分割，文件名通常在第 3 部分 (索引 2)
+            try:
+                parts = link.split('|')
+                if len(parts) >= 3:
+                    file_name_in_link = parts[2].lower()
+                    if file_name_in_link.endswith('.mkv'): ext = 'mkv'
+                    elif file_name_in_link.endswith('.mp4'): ext = 'mp4'
+                    elif file_name_in_link.endswith('.iso'): ext = 'iso'
+                    elif file_name_in_link.endswith('.ts'): ext = 'ts'
+                    elif file_name_in_link.endswith('.avi'): ext = 'avi'
+            except:
+                pass # 解析失败则忽略，回退到下方逻辑
+
+        # 如果上面没提取到 (比如是磁力链或 115 码)，则走原有逻辑
+        if not ext:
+            if 'mkv' in title or link.endswith('.mkv'): ext = 'mkv'
+            elif 'mp4' in title or link.endswith('.mp4'): ext = 'mp4'
+            elif 'iso' in title or link.endswith('.iso'): ext = 'iso'
+            elif 'ts' in title or link.endswith('.ts'): ext = 'ts'
+            elif 'avi' in title or link.endswith('.avi'): ext = 'avi'
+            
+        if not ext or ext not in allowed_containers: 
+            logger.debug(f"  ➜ 资源《{item.get('title')}》被过滤掉了，因为容器 {ext} 不在允许列表中")
             return False
 
     return True
 
-def _check_and_update_rate_limit():
+# ==============================================================================
+# ★★★ 新增：用户 API 交互与自动流控 ★★★
+# ==============================================================================
+
+def get_user_info():
+    """获取用户信息"""
+    url = f"{NULLBR_API_BASE}/user/info"
+    try:
+        proxies = config_manager.get_proxies_for_requests()
+        response = requests.get(url, headers=_get_headers(), timeout=15, proxies=proxies)
+        response.raise_for_status()
+        data = response.json()
+        
+        if data.get('success'):
+            user_data = data.get('data', {})
+            _user_level_cache.update({
+                'sub_name': user_data.get('sub_name', 'free').lower(),
+                'daily_used': user_data.get('daily_used', 0),
+                'daily_quota': user_data.get('daily_quota', 0),
+                'updated_at': time.time()
+            })
+            return user_data
+        else:
+            raise Exception(data.get('message', '获取用户信息失败'))
+    except Exception as e:
+        logger.error(f"  ⚠️ 获取 NULLBR 用户信息异常: {e}")
+        raise e
+
+def redeem_code(code):
     """
-    检查 API 调用限制：
-    1. 每日限额检查
-    2. 请求间隔强制睡眠
+    使用兑换码
     """
-    with _rate_limit_lock:
-        config = get_config()
-        # 获取配置，默认限制 100 次，间隔 5 秒
-        daily_limit = int(config.get('daily_limit', 100))
-        interval = float(config.get('request_interval', 5.0))
+    url = f"{NULLBR_API_BASE}/user/redeem"
+    payload = {"code": code}
+    try:
+        proxies = config_manager.get_proxies_for_requests()
         
-        # 获取统计数据
-        stats = settings_db.get_setting('nullbr_usage_stats') or {}
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        response = requests.post(url, json=payload, headers=_get_headers(), timeout=15, proxies=proxies)
+        data = response.json()
         
-        # 1. 检查日期，如果是新的一天则重置
-        if stats.get('date') != today_str:
-            stats = {
-                'date': today_str,
-                'count': 0,
-                'last_request_ts': 0
-            }
-        
-        # 2. 检查每日限额
-        current_count = stats.get('count', 0)
-        if current_count >= daily_limit:
-            logger.warning(f"NULLBR API 今日调用次数已达上限 ({current_count}/{daily_limit})")
-            raise Exception(f"今日 API 调用次数已达上限 ({daily_limit}次)，请明日再试或增加配额。")
-            
-        # 3. 检查请求间隔 (强制睡眠)
-        last_ts = stats.get('last_request_ts', 0)
-        now_ts = time.time()
-        elapsed = now_ts - last_ts
-        
-        if elapsed < interval:
-            sleep_time = interval - elapsed
-            logger.info(f"  ⏳ 触发流控，强制等待 {sleep_time:.2f} 秒...")
-            time.sleep(sleep_time)
-            
-        # 4. 更新统计
-        stats['count'] = current_count + 1
-        stats['last_request_ts'] = time.time()
-        settings_db.save_setting('nullbr_usage_stats', stats)
-        
-        logger.debug(f"NULLBR API 调用统计: {stats['count']}/{daily_limit}")
+        if response.status_code == 200 and data.get('success'):
+            get_user_info()
+            return data
+        else:
+            msg = data.get('message') or "兑换失败"
+            return {"success": False, "message": msg}
+    except Exception as e:
+        logger.error(f"  ➜ 兑换请求异常: {e}")
+        return {"success": False, "message": str(e)}
+
+def _wait_for_rate_limit():
+    """
+    根据用户等级自动执行流控睡眠
+    Free: 25 req/min -> ~2.4s interval
+    Silver: 60 req/min -> ~1.0s interval
+    Golden: 100 req/min -> ~0.6s interval
+    """
+    # 如果缓存过期(超过1小时)，尝试更新一下，但不阻塞主流程
+    if time.time() - _user_level_cache['updated_at'] > 3600:
+        try:
+            get_user_info()
+        except:
+            pass 
+
+    level = _user_level_cache.get('sub_name', 'free')
+    
+    if 'golden' in level:
+        time.sleep(0.6)
+    elif 'silver' in level:
+        time.sleep(1.0)
+    else:
+        # Free or unknown
+        time.sleep(2.5)
 
 def _enrich_items_with_status(items):
-    """
-    批量查询本地数据库，为 NULLBR 的结果注入 in_library 和 subscription_status 状态
-    """
-    if not items:
-        return items
+    """批量查询本地库状态 (保持不变)"""
+    if not items: return items
+    tmdb_ids = [str(i.get('tmdbid') or i.get('id')) for i in items if (i.get('tmdbid') or i.get('id'))]
+    if not tmdb_ids: return items
 
-    # 1. 提取 ID 列表
-    # NULLBR 返回的 ID 可能是 'id' 或 'tmdbid'
-    tmdb_ids = []
-    for item in items:
-        tid = item.get('tmdbid') or item.get('id')
-        if tid:
-            tmdb_ids.append(str(tid))
-    
-    if not tmdb_ids:
-        return items
-
-    # 2. 批量查询数据库
-    # 假设大部分是电影，混合查询比较麻烦，这里简单处理：
-    # 分别查 Movie 和 Series，或者根据 item 自身的 media_type 判断
-    # 为了效率，我们一次性查出来，在内存里匹配
-    
-    # 获取所有相关 ID 的库内状态 (Movie 和 Series 都查)
     library_map_movie = media_db.check_tmdb_ids_in_library(tmdb_ids, 'Movie')
     library_map_series = media_db.check_tmdb_ids_in_library(tmdb_ids, 'Series')
-    
-    # 获取订阅状态
     sub_status_movie = request_db.get_global_subscription_statuses_by_tmdb_ids(tmdb_ids, 'Movie')
     sub_status_series = request_db.get_global_subscription_statuses_by_tmdb_ids(tmdb_ids, 'Series')
 
-    # 3. 注入状态
     for item in items:
         tid = str(item.get('tmdbid') or item.get('id') or '')
-        mtype = item.get('media_type', 'movie') # 默认为 movie
+        mtype = item.get('media_type', 'movie')
+        if not tid: continue
         
-        if not tid:
-            continue
-
         in_lib = False
         sub_stat = None
-
         if mtype == 'tv':
-            if f"{tid}_Series" in library_map_series:
-                in_lib = True
+            if f"{tid}_Series" in library_map_series: in_lib = True
             sub_stat = sub_status_series.get(tid)
         else:
-            if f"{tid}_Movie" in library_map_movie:
-                in_lib = True
+            if f"{tid}_Movie" in library_map_movie: in_lib = True
             sub_stat = sub_status_movie.get(tid)
-            
+        
         item['in_library'] = in_lib
         item['subscription_status'] = sub_stat
-
     return items
 
 def get_preset_lists():
-    """获取片单列表"""
     custom_presets = settings_db.get_setting('nullbr_presets')
     if custom_presets and isinstance(custom_presets, list) and len(custom_presets) > 0:
         return custom_presets
     return utils.DEFAULT_NULLBR_PRESETS
 
 def fetch_list_items(list_id, page=1):
-    """获取指定片单的详细内容"""
+    _wait_for_rate_limit()
     url = f"{NULLBR_API_BASE}/list/{list_id}"
     params = {"page": page}
     try:
-        logger.info(f"  ➜ 正在获取片单列表: {list_id} (Page {page})")
-        response = requests.get(url, params=params, headers=_get_headers(), timeout=15)
+        proxies = config_manager.get_proxies_for_requests()
+        response = requests.get(url, params=params, headers=_get_headers(), timeout=15, proxies=proxies)
         response.raise_for_status()
         data = response.json()
         items = data.get('items', [])
         enriched_items = _enrich_items_with_status(items)
         return {"code": 200, "data": {"list": enriched_items, "total": data.get('total_results', 0)}}
     except Exception as e:
-        logger.error(f"  ➜ 获取片单失败: {e}")
+        logger.error(f"获取片单失败: {e}")
         raise e
 
 def search_media(keyword, page=1):
-    """搜索资源 """
+    _wait_for_rate_limit() # 自动流控
     url = f"{NULLBR_API_BASE}/search"
     params = { "query": keyword, "page": page }
     try:
@@ -299,44 +308,49 @@ def search_media(keyword, page=1):
         logger.error(f"  ➜ NULLBR 搜索失败: {e}")
         raise e
 
-def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None):
-    # 1. 流控检查
-    try:
-        _check_and_update_rate_limit()
-    except Exception as e:
-        logger.warning(f"  ⚠️ {e}")
-        return []
-
-    # 2. 构造 URL
+def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None, episode_number=None):
+    _wait_for_rate_limit() # 自动流控
+    
     url = ""
     if media_type == 'movie':
         url = f"{NULLBR_API_BASE}/movie/{tmdb_id}/{source_type}"
     elif media_type == 'tv':
-        if season_number:
-            # ★ 关键：如果有季号，请求单季接口
-            url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/season/{season_number}/{source_type}"
+        # ★★★ 核心修改：支持单集 URL 拼接 ★★★
+        if season_number is not None:
+            if episode_number is not None:
+                # 接口: /tv/{id}/season/{s}/episode/{e}/{source}
+                url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/season/{season_number}/episode/{episode_number}/{source_type}"
+            else:
+                # 接口: /tv/{id}/season/{s}/{source}
+                url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/season/{season_number}/{source_type}"
         else:
-            # 没有季号，请求整剧接口 (115) 或 S1 (Magnet)
+            # 整剧搜索 (通常只有 115 支持，或者 magnet 搜第一季)
             if source_type == '115':
                 url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/115"
             elif source_type == 'magnet':
+                # 如果没传季号，默认搜第1季磁力，或者你可以选择不搜
                 url = f"{NULLBR_API_BASE}/tv/{tmdb_id}/season/1/magnet"
             else:
                 return []
     else:
         return []
 
-    # ★ 打印日志，方便你在后台看是否真的带上了季号
-    logger.info(f"  ➜ [DEBUG] NULLBR请求: {url} (Season: {season_number})")
-
     try:
         proxies = config_manager.get_proxies_for_requests()
         response = requests.get(url, headers=_get_headers(), timeout=10, proxies=proxies)
         
-        if response.status_code == 404:
-            return []
+        if response.status_code == 404: return []
         
+        if response.status_code == 402:
+            logger.warning("  ⚠️ NULLBR 接口返回 402: 配额已耗尽")
+            if _user_level_cache['daily_quota'] > 0:
+                _user_level_cache['daily_used'] = _user_level_cache['daily_quota']
+            return []
+            
         response.raise_for_status()
+        
+        _user_level_cache['daily_used'] = _user_level_cache.get('daily_used', 0) + 1
+        
         data = response.json()
         raw_list = data.get(source_type, [])
         
@@ -346,46 +360,26 @@ def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None):
             title = item.get('title') or item.get('name')
             
             if link and title:
-                # 磁力链如果没有季号，默认标记为 S1 (仅显示用)
                 if media_type == 'tv' and source_type == 'magnet' and not season_number:
                     title = f"[S1] {title}"
                 
-                # 中字判断
                 is_zh = item.get('zh_sub') == 1
                 if not is_zh:
                     t_upper = title.upper()
                     zh_keywords = ['中字', '中英', '字幕', 'CHS', 'CHT', 'CN', 'DIY', '国语', '国粤']
-                    if any(k in t_upper for k in zh_keywords):
-                        is_zh = True
+                    if any(k in t_upper for k in zh_keywords): is_zh = True
                 
-                # -------------------------------------------------
-                # ★★★ 强力清洗：再次核对季号，防止 API 返回脏数据 ★★★
-                # -------------------------------------------------
+                # 季号清洗逻辑
                 if media_type == 'tv' and season_number:
                     try:
                         target_season = int(season_number)
-                        title_upper = title.upper()
-                        
-                        # 1. 匹配 Sxx 格式 (如 S04, .S04., [S04])
-                        # 排除 S01-S05 这种合集范围，只匹配单独的季号标识
-                        match = re.search(r'(?:^|\.|\[|\s|-)S(\d{1,2})(?:\.|\]|\s|E|-|$)', title_upper)
-                        if match:
-                            found_season = int(match.group(1))
-                            if found_season != target_season:
-                                # 季号不匹配，跳过
-                                continue
-                        
-                        # 2. 匹配中文 "第x季"
+                        match = re.search(r'(?:^|\.|\[|\s|-)S(\d{1,2})(?:\.|\]|\s|E|-|$)', title.upper())
+                        if match and int(match.group(1)) != target_season: continue
                         match_zh = re.search(r'第(\d{1,2})季', title)
-                        if match_zh:
-                            found_season_zh = int(match_zh.group(1))
-                            if found_season_zh != target_season:
-                                continue
-                    except Exception:
-                        pass # 正则出错不影响主流程
-                # -------------------------------------------------
+                        if match_zh and int(match_zh.group(1)) != target_season: continue
+                    except: pass
 
-                resource_obj = {
+                cleaned_list.append({
                     "title": title,
                     "size": item.get('size', '未知'),
                     "resolution": item.get('resolution'),
@@ -393,65 +387,111 @@ def _fetch_single_source(tmdb_id, media_type, source_type, season_number=None):
                     "link": link,
                     "source_type": source_type.upper(),
                     "is_zh_sub": is_zh
-                }
-                cleaned_list.append(resource_obj)
+                })
         return cleaned_list
     except Exception as e:
         logger.warning(f"  ➜ 获取 {source_type} 资源失败: {e}")
         return []
 
-def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, season_number=None):
-    """
-    获取资源列表
-    """
+def fetch_resource_list(tmdb_id, media_type='movie', specific_source=None, season_number=None, episode_number=None):
     config = get_config()
     
+    # 1. 确定要搜索的源
     if specific_source:
         sources_to_fetch = [specific_source]
     else:
-        sources_to_fetch = config.get('enabled_sources', ['115', 'magnet', 'ed2k'])
+        # 必须拷贝一份，防止修改原配置
+        sources_to_fetch = list(config.get('enabled_sources', ['115', 'magnet', 'ed2k']))
     
-    all_resources = []
-    
-    # 1. 115
-    if '115' in sources_to_fetch:
-        try:
-            res_115 = _fetch_single_source(tmdb_id, media_type, '115', season_number)
-            all_resources.extend(res_115)
-        except Exception as e:
-            # 可以临时加个日志看报错
-            logger.error(f"115 fetch error: {e}")
-            pass
-
-    # 2. Magnet
-    if 'magnet' in sources_to_fetch:
-        try:
-            res_mag = _fetch_single_source(tmdb_id, media_type, 'magnet', season_number)
-            all_resources.extend(res_mag)
-        except Exception: pass
-
-    # 3. Ed2k (仅电影)
-    if media_type == 'movie' and 'ed2k' in sources_to_fetch:
-        try:
-            # 电影不需要季号，保持原样即可，或者传 None
-            res_ed2k = _fetch_single_source(tmdb_id, media_type, 'ed2k')
-            all_resources.extend(res_ed2k)
-        except Exception: pass
-    
-    # 4. 获取过滤配置
-    config = get_config()
+    # 2. 获取过滤配置 (提前获取)
     filters = config.get('filters', {})
     
-    # 5. 执行过滤
-    # 如果 filters 全为空值，则不过滤
-    has_filter = any(filters.values())
-    if not has_filter:
-        return all_resources
-        
-    filtered_list = [res for res in all_resources if _is_resource_valid(res, filters, media_type)]
+    # 如果开启了容器过滤，强制跳过磁力链 搜索以节省配额
+    allowed_containers = filters.get('containers', [])
+    if allowed_containers and 'magnet' in sources_to_fetch:
+        logger.debug(f"  ➜ [NULLBR] 检测到开启了容器过滤 ({allowed_containers})，已跳过磁力链搜索以节省配额。")
+        sources_to_fetch.remove('magnet')
     
-    logger.info(f"  ➜ 资源过滤: 原始 {len(all_resources)} -> 过滤后 {len(filtered_list)}")
-    return filtered_list
+    # 配额检查
+    if _user_level_cache.get('daily_quota', 0) > 0 and _user_level_cache.get('daily_used', 0) >= _user_level_cache.get('daily_quota', 0):
+        logger.warning(f"  ⚠️ 今日配额已用完，无法请求API搜索资源。")
+        raise Exception("今日 API 配额已用完，请明日再试或升级套餐。")
+
+    # ==============================================================================
+    # ★★★ 提前计算集数 (用于大小过滤) ★★★
+    # ==============================================================================
+    episode_count = 0
+    should_fetch_ep_count = False
+    
+    # 只有是剧集且有季号时才考虑
+    if media_type == 'tv' and season_number is not None:
+        # 检查是否配置了大小限制
+        t_min = filters.get('tv_min_size')
+        if t_min is None: t_min = filters.get('min_size')
+        
+        t_max = filters.get('tv_max_size')
+        if t_max is None: t_max = filters.get('max_size')
+        
+        try:
+            if (t_min and float(t_min) > 0) or (t_max and float(t_max) > 0):
+                should_fetch_ep_count = True
+        except:
+            pass 
+
+    if should_fetch_ep_count:
+        try:
+            tmdb_api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+            if tmdb_api_key:
+                season_info = tmdb.get_tv_season_details(tmdb_id, season_number, tmdb_api_key)
+                if season_info and 'episodes' in season_info:
+                    episode_count = len(season_info['episodes'])
+                    logger.info(f"  ➜ [NULLBR] 获取到 （第 {season_number} 季） 总集数: {episode_count}，将按单集平均大小过滤。")
+        except Exception as e:
+            logger.warning(f"  ⚠️ 获取 TMDb 季集数失败: {e}")
+
+    # ==============================================================================
+    # ★★★ 循环获取并分别过滤 ★★★
+    # ==============================================================================
+    final_filtered_list = []
+    
+    # 定义源名称映射
+    source_name_map = {
+        '115': '115分享',
+        'magnet': '磁力链',
+        'ed2k': '电驴(Ed2k)'
+    }
+
+    for source in sources_to_fetch:
+        try:
+            # 针对 ed2k 的特殊判断 (TV 不搜 ed2k)
+            if media_type == 'tv' and source == 'ed2k':
+                if episode_number is None:
+                    continue
+                
+            # 1. 获取原始资源
+            raw_res = _fetch_single_source(tmdb_id, media_type, source, season_number, episode_number)
+            
+            if not raw_res:
+                continue
+
+            # 2. 立即执行过滤
+            current_filtered = [
+                res for res in raw_res 
+                if _is_resource_valid(res, filters, media_type, episode_count=episode_count)
+            ]
+            
+            # 3. 打印带源名称的日志
+            cn_name = source_name_map.get(source, source.upper())
+            logger.info(f"  ➜ {cn_name} 资源过滤: 原始 {len(raw_res)} -> 过滤后 {len(current_filtered)}")
+            
+            # 4. 加入最终列表
+            if current_filtered:
+                final_filtered_list.extend(current_filtered)
+
+        except Exception as e:
+            logger.warning(f"  ➜ 获取 {source} 资源异常: {e}")
+
+    return final_filtered_list
 
 # ==============================================================================
 # ★★★ 115 推送逻辑  ★★★
@@ -471,55 +511,113 @@ def _clean_link(link):
             link = link[:-1]
     return link
 
-def notify_cms_scan():
+
+def _standardize_115_file(client, file_item, save_cid, raw_title, tmdb_id, media_type='movie'):
     """
-    通知 CMS 执行目录整理 (生成 strm)
-    接口: /api/sync/lift_by_token?type=auto_organize&token=...
+    对 115 新入库的文件/文件夹进行标准化重命名
     """
-    config = get_config()
-    cms_url = config.get('cms_url')
-    cms_token = config.get('cms_token')
-
-    if not cms_url or not cms_token:
-        # 用户没配置 CMS，直接忽略，不报错
-        return
-
-    cms_url = cms_url.rstrip('/')
-    # 构造通知接口 URL
-    api_url = f"{cms_url}/api/sync/lift_by_token"
-    params = {
-        "type": "auto_organize",
-        "token": cms_token
-    }
-
     try:
-        logger.info(f"  ➜ 正在通知 CMS 执行整理...")
-        # CMS 通常在内网，不走代理
-        response = requests.get(api_url, params=params, timeout=5)
-        response.raise_for_status()
-        
-        res_json = response.json()
-        if res_json.get('code') == 200 or res_json.get('success'):
-            logger.info(f"  ✅ CMS 通知成功: {res_json.get('msg', 'OK')}")
+        # ==================================================
+        # 1. 获取官方元数据 (TMDb) - 保持原逻辑
+        # ==================================================
+        final_title = raw_title
+        final_year = None
+
+        try:
+            tmdb_api_key = config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_TMDB_API_KEY)
+            if tmdb_api_key and tmdb_id:
+                details = None
+                if media_type == 'tv':
+                    details = tmdb.get_tv_details(tmdb_id, tmdb_api_key)
+                    if details:
+                        final_title = details.get('name')
+                        first_air_date = details.get('first_air_date')
+                        if first_air_date: final_year = first_air_date[:4]
+                else:
+                    details = tmdb.get_movie_details(tmdb_id, tmdb_api_key)
+                    if details:
+                        final_title = details.get('title')
+                        release_date = details.get('release_date')
+                        if release_date: final_year = release_date[:4]
+        except Exception as e:
+            logger.warning(f"  ⚠️ [整理] TMDb 获取失败: {e}")
+
+        if not final_year:
+            match = re.search(r'[(（](\d{4})[)）]', raw_title)
+            if match: final_year = match.group(1)
+
+        safe_title = re.sub(r'[\\/:*?"<>|]', '', final_title).strip()
+        std_name = f"{safe_title} ({final_year}) {{tmdb={tmdb_id}}}" if final_year else f"{safe_title} {{tmdb={tmdb_id}}}"
+
+        # ==================================================
+        # 2. 核心修复：区分 文件夹重命名 与 单文件归档
+        # ==================================================
+        # 115 文件夹标识：ico == 'folder' 或者没有 fid (只有 cid)
+        is_directory = (file_item.get('ico') == 'folder') or (not file_item.get('fid'))
+        current_name = file_item.get('n')
+
+        if current_name == std_name:
+            logger.info(f"  ✅ [整理] 名称已符合标准，跳过操作。")
+            return
+
+        if is_directory:
+            folder_id = file_item.get('cid')
+            logger.info(f"  🛠️ [整理] 识别为文件夹，执行重命名: {current_name} -> {std_name}")
+
+            # 修复：将两个参数封装成一个元组传入
+            rename_res = client.fs_rename((folder_id, std_name))
+
+            if isinstance(rename_res, dict) and rename_res.get('state'):
+                logger.info(f"  ✅ [整理] 文件夹重命名成功")
+            else:
+                logger.warning(f"  ⚠️ [整理] 重命名失败: {rename_res}")
+
         else:
-            logger.warning(f"  ⚠️ CMS 通知返回异常: {res_json}")
+            # === 情况 B: 单文件归档 ===
+            file_id = file_item.get('fid')
+            logger.info(f"  🛠️ [整理] 识别为单文件，正在归档至目录: {std_name}")
+
+            # 检查目标文件夹是否存在
+            target_dir_cid = None
+            # 这里的 search 逻辑要小心，115 的搜索返回结构可能不同
+            search_res = client.fs_files({'cid': save_cid, 'search_value': std_name})
+            if isinstance(search_res, dict) and search_res.get('data'):
+                for item in search_res['data']:
+                    if item.get('n') == std_name and (item.get('ico') == 'folder' or not item.get('fid')):
+                        target_dir_cid = item.get('cid')
+                        break
+
+            if not target_dir_cid:
+                mkdir_res = client.fs_mkdir(std_name, save_cid)
+                if isinstance(mkdir_res, dict) and mkdir_res.get('state'):
+                    target_dir_cid = mkdir_res.get('cid')
+                else:
+                    logger.error(f"  ❌ [整理] 创建文件夹失败")
+                    return
+
+            # 执行移动
+            move_res = client.fs_move([file_id], target_dir_cid)
+            if isinstance(move_res, dict) and move_res.get('state'):
+                logger.info(f"  ✅ [整理] 单文件已归档成功")
+            else:
+                logger.warning(f"  ⚠️ [整理] 移动文件失败")
 
     except Exception as e:
-        # 通知失败不应该影响主流程的成功状态，只记录日志
-        logger.warning(f"  ⚠️ CMS 通知发送失败: {e}")
-        raise e
+        # 这里会捕获到 "not enough values to unpack" 并打印具体位置
+        logger.error(f"  ⚠️ 标准化重命名流程异常: {e}", exc_info=True)
 
-def push_to_115(resource_link, title):
+def push_to_115(resource_link, title, tmdb_id=None, media_type=None):
     """
     智能推送：支持 115/115cdn/anxia 转存 和 磁力离线
-    ★ 修复：改用【文件指纹(PickCode)对比法】检测新文件/文件夹，并延长等待时间
+    并执行 智能整理 (Smart Organize)
     """
-    if P115Client is None:
-        raise ImportError("未安装 p115 库")
+    client = P115Service.get_client()
+    if not client: raise Exception("无法初始化 115 客户端")
 
     config = get_config()
     cookies = config.get('p115_cookies')
     
+    # 默认保存路径 (中转站)
     try:
         cid_val = config.get('p115_save_path_cid', 0)
         save_path_cid = int(cid_val) if cid_val else 0
@@ -530,194 +628,148 @@ def push_to_115(resource_link, title):
         raise ValueError("未配置 115 Cookies")
 
     clean_url = _clean_link(resource_link)
-    logger.info(f"  ➜ [DEBUG] 待处理链接: {clean_url}")
+    logger.info(f"  ➜ [NULLBR] 待处理链接: {clean_url}")
     
-    client = P115Client(cookies)
+    # ==================================================
+    # ★★★ 步骤 1: 建立目录快照 (用于捕获新文件) ★★★
+    # ==================================================
+    existing_ids = set()
+    try:
+        # 扫描前50个文件即可，通常新文件在最前
+        files_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
+        if files_res.get('data'):
+            for item in files_res['data']:
+                item_id = item.get('fid') or item.get('cid') 
+                if item_id: existing_ids.add(str(item_id))
+    except Exception as e:
+        logger.warning(f"  ⚠️ 获取目录快照失败: {e}")
+
+    # ==================================================
+    # ★★★ 步骤 2: 执行任务 (转存 或 离线) ★★★
+    # ==================================================
+    target_domains = ['115.com', '115cdn.com', 'anxia.com']
+    is_115_share = any(d in clean_url for d in target_domains) and ('magnet' not in clean_url)
+    task_success = False
     
     try:
-        # 支持 115.com, 115cdn.com, anxia.com
-        target_domains = ['115.com', '115cdn.com', 'anxia.com']
-        is_115_share = any(d in clean_url for d in target_domains) and ('magnet' not in clean_url)
-        
         if is_115_share:
-            # ... (115 分享链接转存逻辑保持不变) ...
-            logger.info(f"  ➜ [模式] 识别为 115 转存任务 -> CID: {save_path_cid}")
+            logger.info(f"  ➜ [NULLBR] 识别为 115 转存任务 -> CID: {save_path_cid}")
             share_code = None
             match = re.search(r'/s/([a-z0-9]+)', clean_url)
             if match: share_code = match.group(1)
-            if not share_code: raise Exception("无法从链接中提取分享码")
+            if not share_code: raise Exception("无法提取分享码")
             receive_code = ''
             pwd_match = re.search(r'password=([a-z0-9]+)', clean_url)
             if pwd_match: receive_code = pwd_match.group(1)
             
             resp = {} 
-            try:
-                if hasattr(client, 'fs_share_import_to_dir'):
-                     resp = client.fs_share_import_to_dir(share_code, receive_code, save_path_cid)
-                elif hasattr(client, 'fs_share_import'):
-                    resp = client.fs_share_import(share_code, receive_code, save_path_cid)
-                elif hasattr(client, 'share_import'):
-                    resp = client.share_import(share_code, receive_code, save_path_cid)
-                else:
-                    api_url = "https://webapi.115.com/share/receive"
-                    payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': save_path_cid}
-                    r = client.request(api_url, method='POST', data=payload)
-                    resp = r.json() if hasattr(r, 'json') else r
-            except Exception as e:
-                raise Exception(f"调用转存接口失败: {e}")
+            if hasattr(client, 'fs_share_import_to_dir'):
+                    resp = client.fs_share_import_to_dir(share_code, receive_code, save_path_cid)
+            elif hasattr(client, 'fs_share_import'):
+                resp = client.fs_share_import(share_code, receive_code, save_path_cid)
+            elif hasattr(client, 'share_import'):
+                resp = client.share_import(share_code, receive_code, save_path_cid)
+            else:
+                api_url = "https://webapi.115.com/share/receive"
+                payload = {'share_code': share_code, 'receive_code': receive_code, 'cid': save_path_cid}
+                r = client.request(api_url, method='POST', data=payload)
+                resp = r.json() if hasattr(r, 'json') else r
 
             if resp and resp.get('state'):
-                logger.info(f"  ✅ 115 转存成功: {title}")
-                return True
+                logger.info(f"  ✅ 115 转存请求成功")
+                task_success = True
             else:
-                err = resp.get('error_msg') if resp else '无响应'
-                err = err or resp.get('msg') or str(resp)
+                err = resp.get('error_msg') or resp.get('msg') or str(resp)
                 raise Exception(f"转存失败: {err}")
-
         else:
-            # ==================================================
-            # ★★★ 磁力/Ed2k 离线下载 (指纹对比版) ★★★
-            # ==================================================
-            logger.info(f"  ➜ [模式] 识别为磁力/离线任务 -> CID: {save_path_cid}")
-            
-            # 1. 【关键步骤】建立快照：记录当前目录下已存在文件的 pick_code
-            existing_pick_codes = set()
-            try:
-                # 获取前50个文件/文件夹 (按上传时间倒序)
-                # 注意：115 API 返回的 pc (pick_code) 是唯一标识
-                files_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
-                if files_res.get('data'):
-                    for item in files_res['data']:
-                        if item.get('pc'):
-                            existing_pick_codes.add(item.get('pc'))
-            except Exception as e:
-                logger.warning(f"  ⚠️ 获取目录快照失败(可能是空目录): {e}")
-            
-            logger.info(f"  ➜ [快照] 当前目录已有 {len(existing_pick_codes)} 个项目")
-
-            # 2. 添加任务
+            logger.info(f"  ➜ [NULLBR] 识别为磁力/离线任务 -> CID: {save_path_cid}")
             payload = {'url[0]': clean_url, 'wp_path_id': save_path_cid}
             resp = client.offline_add_urls(payload)
-            
             if resp.get('state'):
-                # 获取 info_hash 用于辅助检查死链
-                result_list = resp.get('result', [])
-                info_hash = None
-                if result_list and isinstance(result_list, list):
-                    info_hash = result_list[0].get('info_hash')
-
-                # 3. 轮询检测目录 (延长到 45秒)
-                # 文件夹生成比较慢，给足时间
-                max_retries = 3  # 15次 * 3秒 = 45秒
-                success_found = False
-                
-                logger.info(f"  ➜ 任务已提交，正在扫描新项目...")
-
-                for i in range(max_retries):
-                    time.sleep(3) 
-                    
-                    # --- A. 检查目录是否有【不在快照里】的新项目 ---
-                    try:
-                        check_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
-                        if check_res.get('data'):
-                            for item in check_res['data']:
-                                current_pc = item.get('pc')
-                                # 如果发现一个 pick_code 不在旧集合里，说明是新生成的
-                                if current_pc and (current_pc not in existing_pick_codes):
-                                    item_name = item.get('n', '未知')
-                                    logger.info(f"  ✅ [第{i+1}次检查] 发现新项目: {item_name}")
-                                    success_found = True
-                                    break
-                        if success_found:
-                            break
-                    except Exception as e:
-                        pass # 网络波动忽略
-
-                    # --- B. 辅助检查：任务是否挂了 ---
-                    try:
-                        list_resp = client.offline_list(page=1)
-                        tasks = list_resp.get('tasks', [])
-                        for task in tasks[:10]:
-                            if info_hash and task.get('info_hash') == info_hash:
-                                if task.get('status') == -1:
-                                    try: client.offline_delete([task.get('info_hash')])
-                                    except: pass
-                                    raise Exception("115任务状态变为[下载失败]")
-                    except Exception as task_err:
-                        if "下载失败" in str(task_err): raise task_err
-                        pass
-
-                if success_found:
-                    logger.info(f"  ✅ 115 离线成功: {title}")
-                    return True
-                else:
-                    # 超时未发现新文件
-                    try: 
-                        if info_hash: client.offline_delete([info_hash])
-                    except: pass
-                    
-                    logger.warning(f"  ❌ 未在目录发现新项目，判定为死链或下载过慢")
-                    raise Exception("资源无效，请换个源试试")
-
+                task_success = True
+                logger.info(f"  ➜ [NULLBR] 任务已提交，等待文件生成...")
             else:
                 err = resp.get('error_msg') or resp.get('msg') or '未知错误'
                 if '已存在' in str(err):
-                    logger.info(f"  ✅ 任务已存在: {title}")
-                    return True
-                raise Exception(f"离线失败: {err}")
-
+                    task_success = True
+                    logger.info(f"  ✅ 任务已存在")
+                else:
+                    raise Exception(f"离线失败: {err}")
     except Exception as e:
-        logger.error(f"  ➜ 115 推送异常: {e}")
-        if "Login" in str(e) or "cookie" in str(e).lower():
-            raise Exception("115 Cookie 无效")
         raise e
 
-def get_115_account_info():
-    """
-    极简状态检查：只验证 Cookie 是否有效，不获取任何详情
-    """
-    if P115Client is None:
-        raise Exception("未安装 p115client")
+    # ==================================================
+    # ★★★ 步骤 3: 扫描新文件并执行智能整理 ★★★
+    # ==================================================
+    if task_success:
+        # 轮询查找新文件
+        max_retries = 8 # 稍微增加重试次数
+        found_item = None
         
-    config = get_config()
-    cookies = config.get('p115_cookies')
-    
-    if not cookies:
-        raise Exception("未配置 Cookies")
+        for i in range(max_retries):
+            time.sleep(3)
+            try:
+                check_res = client.fs_files({'cid': save_path_cid, 'limit': 50, 'o': 'user_ptime', 'asc': 0})
+                if check_res.get('data'):
+                    for item in check_res['data']:
+                        current_id = item.get('fid') or item.get('cid')
+                        if current_id and (str(current_id) not in existing_ids):
+                            found_item = item
+                            break
+                if found_item:
+                    break
+            except Exception as e:
+                logger.debug(f"轮询出错: {e}")
         
-    try:
-        client = P115Client(cookies)
-        
-        # 尝试列出 1 个文件，这是验证 Cookie 最快最准的方法
-        resp = client.fs_files({'limit': 1})
-        
-        if not resp.get('state'):
-            raise Exception("Cookie 已失效")
+        if found_item:
+            item_name = found_item.get('n', '未知')
+            logger.info(f"  👀 捕获到新入库项目: {item_name}")
             
-        # 只要没报错，就是有效
-        return {
-            "valid": True,
-            "msg": "Cookie 状态正常，可正常推送"
-        }
+            # ★★★ 核心修改：调用智能整理 ★★★
+            if tmdb_id:
+                try:
+                    # 检查是否开启了整理功能
+                    enable_organize = config.get('enable_smart_organize', False)
+                    
+                    if enable_organize:
+                        logger.info("  🧠 [整理] 智能整理已开启，开始分析...")
+                        organizer = SmartOrganizer(client, tmdb_id, media_type, title)
+                        target_cid = organizer.get_target_cid()
+                        
+                        # 无论是否命中规则，只要开启了整理，就执行重命名
+                        # 如果没命中规则，target_cid 为 None，则只重命名不移动
+                        organizer.execute(found_item, target_cid)
+                    else:
+                        # 旧逻辑：仅简单重命名
+                        _standardize_115_file(client, found_item, save_path_cid, title, tmdb_id, media_type)
+                        
+                except Exception as e:
+                    logger.error(f"  ❌ [整理] 智能整理执行失败: {e}", exc_info=True)
+            else:
+                logger.debug("  ⚠️ 未提供 TMDb ID，跳过整理")
+            
+            return True
+        else:
+            if is_115_share:
+                logger.warning("  ⚠️ 转存显示成功但未捕获到新文件ID (可能文件已存在)")
+                return True
+            else:
+                logger.warning("  ❌ 离线任务超时，未在目录发现新文件 (死链或下载过慢)")
+                # 磁力链可能需要很久，这里不报错，只是无法执行整理
+                return True
 
-    except Exception as e:
-        # logger.error(f"115 状态检查失败: {e}") # 嫌烦可以注释掉日志
-        raise Exception("Cookie 无效或网络不通")
+    return False
 
-def handle_push_request(link, title):
+def handle_push_request(link, title, tmdb_id=None, media_type=None):
     """
     统一推送入口
     """
-    # 1. 推送到 115 (如果失败或死链，这里会直接抛出异常，中断流程)
-    push_to_115(link, title)
-    
-    # 2. 115 成功后，通知 CMS 整理
-    # (这个函数内部会检查是否有配置，没配置就静默跳过)
-    notify_cms_scan()
+    # 推送到 115 (传递 ID 以便重命名)
+    push_to_115(link, title, tmdb_id, media_type)
     
     return True
 
-def auto_download_best_resource(tmdb_id, media_type, title, season_number=None):
+def auto_download_best_resource(tmdb_id, media_type, title, season_number=None, episode_number=None):
     """
     [自动任务专用] 搜索并下载最佳资源
     :param season_number: 季号 (仅 media_type='tv' 时有效)
@@ -734,16 +786,15 @@ def auto_download_best_resource(tmdb_id, media_type, title, season_number=None):
         # 构造日志标题
         log_title = title
         if media_type == 'tv' and season_number:
-            log_title = f"{title} S{season_number}"
+            log_title = f"《{title}》第 {season_number} 季"
 
-        logger.info(f"  ➜ [自动任务] 开始搜索资源: {log_title} (ID: {tmdb_id})")
+        logger.info(f"  ➜ [NULLBR] 开始搜索资源: {log_title} (ID: {tmdb_id})")
 
         for source in priority_sources:
             if source not in user_enabled: continue
             if media_type == 'tv' and source == 'ed2k': continue
 
-            # ★★★ 修改：透传 season_number ★★★
-            resources = fetch_resource_list(tmdb_id, media_type, specific_source=source, season_number=season_number)
+            resources = fetch_resource_list(tmdb_id, media_type, specific_source=source, season_number=season_number, episode_number=episode_number)
             
             if not resources:
                 continue
@@ -755,7 +806,7 @@ def auto_download_best_resource(tmdb_id, media_type, title, season_number=None):
                     logger.info(f"  👉 尝试第 {index + 1} 个资源: {res['title']}")
                     
                     # 调用统一推送入口 (115 -> CMS Notify)
-                    handle_push_request(res['link'], title)
+                    handle_push_request(res['link'], title, tmdb_id, media_type)
                     
                     logger.info(f"  ✅ 资源推送成功，停止后续尝试。")
                     return True
@@ -771,5 +822,5 @@ def auto_download_best_resource(tmdb_id, media_type, title, season_number=None):
         return False
 
     except Exception as e:
-        logger.error(f"  ➜ NULLBR 自动兜底失败: {e}")
+        logger.error(f"  ➜ NULLBR 搜索失败: {e}")
         return False

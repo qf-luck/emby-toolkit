@@ -4,6 +4,7 @@ import os
 import json
 import time
 import re
+import copy
 import random
 from typing import Dict, List, Optional, Any, Tuple
 from collections import defaultdict
@@ -107,7 +108,7 @@ def _aggregate_series_cast_from_tmdb_data(series_data: Dict[str, Any], all_episo
     logger.info(f"  ➜ 共为 '{series_data.get('name')}' 聚合了 {len(full_aggregated_cast)} 位独立演员。")
     return full_aggregated_cast
 class MediaProcessor:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: Dict[str, Any], ai_translator=None, douban_api=None):
         # ★★★ 然后，从这个 config 字典里，解析出所有需要的属性 ★★★
         self.config = config
 
@@ -115,51 +116,14 @@ class MediaProcessor:
         self.actor_db_manager = ActorDBManager()
         self.log_db_manager = LogDBManager()
 
-        # 从 config 中获取所有其他配置
-        self.douban_api = None
-        if getattr(constants, 'DOUBAN_API_AVAILABLE', False):
-            try:
-                # --- ✨✨✨ 核心修改区域 START ✨✨✨ ---
-
-                # 1. 从配置中获取冷却时间 
-                douban_cooldown = self.config.get(constants.CONFIG_OPTION_DOUBAN_DEFAULT_COOLDOWN, 2.0)
-                
-                # 2. 从配置中获取 Cookie，使用我们刚刚在 constants.py 中定义的常量
-                douban_cookie = self.config.get(constants.CONFIG_OPTION_DOUBAN_COOKIE, "")
-                
-                # 3. 添加一个日志，方便调试
-                if not douban_cookie:
-                    logger.debug(f"配置文件中未找到或未设置 '{constants.CONFIG_OPTION_DOUBAN_COOKIE}'。如果豆瓣API返回'need_login'错误，请配置豆瓣cookie。")
-                else:
-                    logger.debug("已从配置中加载豆瓣 Cookie。")
-
-                # 4. 将所有参数传递给 DoubanApi 的构造函数
-                self.douban_api = DoubanApi(
-                    cooldown_seconds=douban_cooldown,
-                    user_cookie=douban_cookie  # <--- 将 cookie 传进去
-                )
-                logger.trace("DoubanApi 实例已在 MediaProcessorAPI 中创建。")
-                
-                # --- ✨✨✨ 核心修改区域 END ✨✨✨ ---
-
-            except Exception as e:
-                logger.error(f"MediaProcessorAPI 初始化 DoubanApi 失败: {e}", exc_info=True)
-        else:
-            logger.warning("DoubanApi 常量指示不可用，将不使用豆瓣功能。")
+        self.douban_api = douban_api
         self.emby_url = self.config.get("emby_server_url")
         self.emby_api_key = self.config.get("emby_api_key")
         self.emby_user_id = self.config.get("emby_user_id")
         self.tmdb_api_key = self.config.get("tmdb_api_key", "")
         self.local_data_path = self.config.get("local_data_path", "").strip()
 
-        self.ai_enabled = any([
-            self.config.get("ai_translate_actor_role", False),
-            self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_TITLE, False),    
-            self.config.get(constants.CONFIG_OPTION_AI_TRANSLATE_OVERVIEW, False), 
-            self.config.get("ai_translate_episode_overview", False),
-            self.config.get("ai_vector", False),
-        ])
-        self.ai_translator = AITranslator(self.config) if self.ai_enabled else None
+        self.ai_translator = ai_translator
         
         self._stop_event = threading.Event()
         self.processed_items_cache = self._load_processed_log_from_db()
@@ -765,168 +729,6 @@ class MediaProcessor:
         else:
             logger.warning(f"  ⚠️ [实时监控] 未收集到有效的刷新目录，任务结束。")
 
-    # --- 内部私有方法：单文件数据库清理逻辑 ---
-    def _cleanup_local_db_for_deleted_file(self, filename: str) -> bool:
-        """
-        根据文件名执行本地数据库的清理工作（不含 Emby 刷新）。
-        返回 True 表示执行了清理，False 表示未找到记录。
-        """
-        # 1. 精确反查 (获取 target_emby_id)
-        media_info = media_db.get_media_info_by_filename(filename)
-        
-        if media_info:
-            tmdb_id = media_info.get('tmdb_id')
-            item_type = media_info.get('item_type')
-            item_name = media_info.get('title', filename)
-            target_emby_id = media_info.get('target_emby_id')
-            
-            # 提取父剧集 ID (如果是分集)
-            parent_series_tmdb_id = media_info.get('parent_series_tmdb_id')
-            
-            # 兜底：如果资产里没记 ID，尝试取 emby_item_ids_json 的第一个
-            if not target_emby_id:
-                all_ids = media_info.get('emby_item_ids_json')
-                if all_ids and len(all_ids) > 0:
-                    target_emby_id = all_ids[0]
-
-            if target_emby_id:
-                logger.info(f"  ➜ [文件删除] 数据库命中: '{item_name}' (TMDB:{tmdb_id}) -> 对应 EmbyID: {target_emby_id}")
-                
-                # 2. 清理数据库 (maintenance_db 会自动处理父剧集的状态标记)
-                cascaded_info = maintenance_db.cleanup_deleted_media_item(
-                    item_id=target_emby_id,
-                    item_name=item_name,
-                    item_type=item_type,
-                    series_id_from_webhook=None 
-                )
-                
-                # 3. 智能清理日志和缓存
-                ids_to_clean = set()
-
-                if cascaded_info:
-                    # 情况 A: 触发了级联下架 (Series 或 Movie)
-                    # 我们清理该顶层媒体关联的所有 Emby ID
-                    if cascaded_info.get('emby_ids'):
-                        ids_to_clean.update(cascaded_info['emby_ids'])
-                        logger.info(f"  🧹 [级联清理] 顶层媒体 {cascaded_info.get('item_name', '未知')} (TMDB:{cascaded_info['tmdb_id']}) 已离线，准备清理 {len(ids_to_clean)} 条关联日志。")
-                    
-                    # 如果是电影，target_emby_id 本身就是顶层 ID，确保它被包含
-                    if item_type == 'Movie':
-                        ids_to_clean.add(target_emby_id)
-                
-                else:
-                    # 情况 B: 只是删了个分集，剧还在
-                    # 如果是电影（虽然上面覆盖了），还是删一下比较好
-                    if item_type == 'Movie':
-                        ids_to_clean.add(target_emby_id)
-
-                # 统一执行清理
-                if ids_to_clean:
-                    try:
-                        with get_central_db_connection() as conn:
-                            cursor = conn.cursor()
-                            for clean_id in ids_to_clean:
-                                # 1. 删除已处理日志
-                                self.log_db_manager.remove_from_processed_log(cursor, clean_id)
-                                # 2. 删除待复核日志
-                                self.log_db_manager.remove_from_failed_log(cursor, clean_id)
-                                # 3. 删除内存缓存
-                                if clean_id in self.processed_items_cache:
-                                    del self.processed_items_cache[clean_id]
-                            conn.commit()
-                        logger.info(f"  ➜ [文件删除] 已清理 {len(ids_to_clean)} 条相关的已处理/待复核/缓存。")
-                    except Exception as e:
-                        logger.warning(f"  ➜ [文件删除] 清理日志时遇到轻微错误: {e}")
-
-                return True
-            else:
-                logger.warning(f"  ➜ [文件删除] 数据库记录存在但无法定位 Emby ID，跳过本地清理: {filename}")
-        
-        return False
-
-    # --- 实时监控：处理文件删除 (单文件版) ---
-    def process_file_deletion(self, file_path: str):
-        """
-        实时监控：处理单个文件删除事件。
-        """
-        try:
-            filename = os.path.basename(file_path)
-            folder_path = os.path.dirname(file_path)
-            
-            logger.info(f"  🗑️ [文件删除] 检测到文件移除: {filename}")
-            
-            # 1. 执行数据库清理
-            cleaned = self._cleanup_local_db_for_deleted_file(filename)
-            
-            # 2. 刷新向量缓存 (如果有清理动作且开启了推荐)
-            if cleaned and config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_ENABLED) and config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_AI_VECTOR):
-                try:
-                    threading.Thread(target=RecommendationEngine.refresh_cache).start()
-                except: pass
-
-            # 3. 通知 Emby 刷新 (无论本地是否清理，都要通知 Emby 同步)
-            logger.info(f"  ➜ [文件删除] 通知 Emby 刷新父目录: {folder_path}")
-            emby.refresh_library_by_path(folder_path, self.emby_url, self.emby_api_key)
-
-        except Exception as e:
-            logger.error(f"  🚫 [文件删除] 处理失败: {e}", exc_info=True)
-
-    # --- 实时监控：处理文件删除 (批量版) ---
-    def process_file_deletion_batch(self, file_paths: List[str]):
-        """
-        实时监控：批量处理文件删除事件。
-        ★ 优化：ID 级别去重刷新。
-        """
-        if not file_paths:
-            return
-
-        logger.info(f"  🗑️ [批量删除] 开始处理 {len(file_paths)} 个文件的删除事件...")
-        
-        folders_to_check = set()
-        cleaned_count = 0
-        
-        # 1. 循环清理数据库
-        for file_path in file_paths:
-            try:
-                filename = os.path.basename(file_path)
-                folder_path = os.path.dirname(file_path)
-                folders_to_check.add(folder_path)
-                
-                if self._cleanup_local_db_for_deleted_file(filename):
-                    cleaned_count += 1
-            except Exception as e:
-                logger.error(f"  🚫 [批量删除] 处理文件 '{file_path}' 时出错: {e}")
-
-        # 2. 刷新向量缓存
-        if cleaned_count > 0 and config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_PROXY_ENABLED) and config_manager.APP_CONFIG.get(constants.CONFIG_OPTION_AI_VECTOR):
-            try:
-                threading.Thread(target=RecommendationEngine.refresh_cache).start()
-            except: pass
-
-        # 3. ★★★ ID 级别去重与刷新 ★★★
-        logger.info(f"  🔍 [批量删除] 数据库清理完成 ({cleaned_count}/{len(file_paths)})，正在解析 {len(folders_to_check)} 个路径对应的 Emby 锚点...")
-        
-        unique_anchor_map = {}
-        fallback_paths = []
-
-        for folder_path in folders_to_check:
-            anchor_id, anchor_name = emby.find_nearest_library_anchor(folder_path, self.emby_url, self.emby_api_key)
-            if anchor_id:
-                unique_anchor_map[anchor_id] = anchor_name
-            else:
-                fallback_paths.append(folder_path)
-
-        if unique_anchor_map:
-            logger.info(f"  🚀 [批量删除] 聚合完成，正在刷新 {len(unique_anchor_map)} 个 Emby 锚点...")
-            for anchor_id, anchor_name in unique_anchor_map.items():
-                logger.info(f"  ➜ 正在刷新: '{anchor_name}' (ID: {anchor_id})")
-                emby.refresh_item_by_id(anchor_id, self.emby_url, self.emby_api_key)
-                time.sleep(0.2)
-
-        if fallback_paths:
-            for path in fallback_paths:
-                emby.refresh_library_by_path(path, self.emby_url, self.emby_api_key)
-
     def _refresh_lib_guid_map(self):
         """从 Emby 实时获取所有媒体库的 ID 到 GUID 映射"""
         try:
@@ -1071,30 +873,23 @@ class MediaProcessor:
             
             genres_json = json.dumps(genres_list, ensure_ascii=False)
 
-            # 2. Studios (工作室/制作公司/电视网)
-            # 剧集只取 networks，电影只取 production_companies 
-            raw_studios = []
-            if m_type == 'Series':
-                # 剧集：只要播出平台 (Networks)，不要制作公司
-                raw_studios = details.get('networks') or []
-            else:
-                # 电影：保留制作公司
-                raw_studios = details.get('production_companies') or []
-            
-            if isinstance(raw_studios, list): 
-                raw_studios = list(raw_studios)
-            else: 
-                raw_studios = []
-            
-            unique_studios_map = {}
-            for s in raw_studios:
-                if isinstance(s, dict):
-                    s_id = s.get('id')
-                    s_name = s.get('name')
-                    if s_name: unique_studios_map[s_id] = {'id': s_id, 'name': s_name}
-                elif isinstance(s, str) and s:
-                    unique_studios_map[s] = {'id': None, 'name': s}
-            studios_json = json.dumps(list(unique_studios_map.values()), ensure_ascii=False)
+            # A. 制作公司 (Production Companies)
+            raw_companies = details.get('production_companies') or []
+            companies_list = []
+            if isinstance(raw_companies, list):
+                for c in raw_companies:
+                    if isinstance(c, dict) and c.get('name'):
+                        companies_list.append({'id': c.get('id'), 'name': c.get('name')})
+            companies_json = json.dumps(companies_list, ensure_ascii=False)
+
+            # B. 电视网 (Networks - 仅限剧集)
+            raw_networks = details.get('networks') or []
+            networks_list = []
+            if isinstance(raw_networks, list):
+                for n in raw_networks:
+                    if isinstance(n, dict) and n.get('name'):
+                        networks_list.append({'id': n.get('id'), 'name': n.get('name')})
+            networks_json = json.dumps(networks_list, ensure_ascii=False)
 
             # 3. Keywords (关键词)
             keywords_data = details.get('keywords') or details.get('tags') or []
@@ -1121,7 +916,7 @@ class MediaProcessor:
                     if code: country_codes.append(code)
                 elif isinstance(c, str) and c: country_codes.append(c)
             countries_json = json.dumps(country_codes, ensure_ascii=False)
-            return genres_json, studios_json, keywords_json, countries_json
+            return genres_json, companies_json, networks_json, keywords_json, countries_json
 
         try:
             from psycopg2.extras import execute_batch
@@ -1175,9 +970,10 @@ class MediaProcessor:
                 movie_record['overview_embedding'] = overview_embedding_json
 
                 # 通用字段
-                g_json, s_json, k_json, c_json = _extract_common_json_fields(source_data_package, 'Movie')
+                g_json, comp_json, net_json, k_json, c_json = _extract_common_json_fields(source_data_package, 'Movie')
                 movie_record['genres_json'] = g_json
-                movie_record['studios_json'] = s_json
+                movie_record['production_companies_json'] = comp_json
+                movie_record['networks_json'] = net_json
                 movie_record['keywords_json'] = k_json
                 movie_record['countries_json'] = c_json
 
@@ -1232,7 +1028,11 @@ class MediaProcessor:
                 series_record = {
                     "item_type": "Series", "tmdb_id": str(series_details.get('id')), "title": series_details.get('name'),
                     "original_title": series_details.get('original_name'), "overview": series_details.get('overview'),
-                    "release_date": series_details.get('first_air_date'), "poster_path": series_details.get('poster_path'),
+                    "release_date": series_details.get('first_air_date'),
+                    "last_air_date": series_details.get('last_air_date'),
+                    "poster_path": series_details.get('poster_path'),
+                    "backdrop_path": series_details.get('backdrop_path'),
+                    "homepage": series_details.get('homepage'),
                     "rating": series_details.get('vote_average'),
                     "total_episodes": series_details.get('number_of_episodes', 0),
                     "watchlist_tmdb_status": series_details.get('status'),
@@ -1261,9 +1061,10 @@ class MediaProcessor:
                 series_record['official_rating_json'] = json.dumps(raw_ratings_map, ensure_ascii=False)
 
                 # 通用字段
-                g_json, s_json, k_json, c_json = _extract_common_json_fields(series_details, 'Series')
+                g_json, comp_json, net_json, k_json, c_json = _extract_common_json_fields(series_details, 'Series')
                 series_record['genres_json'] = g_json
-                series_record['studios_json'] = s_json
+                series_record['production_companies_json'] = comp_json
+                series_record['networks_json'] = net_json
                 series_record['keywords_json'] = k_json
                 series_record['countries_json'] = c_json
                 
@@ -1405,11 +1206,12 @@ class MediaProcessor:
             # ==================================================================
             all_possible_columns = [
                 "tmdb_id", "item_type", "title", "original_title", "overview", "release_date", "release_year",
+                "last_air_date", "backdrop_path", "homepage",
                 "original_language",
                 "poster_path", "rating", "actors_json", "parent_series_tmdb_id", "season_number", "episode_number",
                 "in_library", "subscription_status", "subscription_sources_json", "emby_item_ids_json", "date_added",
                 "official_rating_json",
-                "genres_json", "directors_json", "studios_json", "countries_json", "keywords_json", "ignore_reason",
+                "genres_json", "directors_json", "production_companies_json", "networks_json", "countries_json", "keywords_json", "ignore_reason",
                 "asset_details_json",
                 "runtime_minutes",
                 "overview_embedding",
@@ -1432,6 +1234,9 @@ class MediaProcessor:
                 r_date = db_row_complete.get('release_date')
                 if not r_date: db_row_complete['release_date'] = None
                 
+                l_date = db_row_complete.get('last_air_date')
+                if not l_date: db_row_complete['last_air_date'] = None
+
                 final_date_val = db_row_complete.get('release_date')
                 if final_date_val and isinstance(final_date_val, str) and len(final_date_val) >= 4:
                     try: db_row_complete['release_year'] = int(final_date_val[:4])
@@ -1533,7 +1338,7 @@ class MediaProcessor:
         logger.info(f"  ➜ 开始为新入库剧集 '{item_name_for_log}' 进行追剧状态判断...")
         try:
             # 实例化 WatchlistProcessor 并执行添加操作
-            watchlist_proc = WatchlistProcessor(self.config)
+            watchlist_proc = WatchlistProcessor(self.config, ai_translator=self.ai_translator)
             watchlist_proc.add_series_to_watchlist(item_details)
         except Exception as e_watchlist:
             logger.error(f"  ➜ 在自动添加 '{item_name_for_log}' 到追剧列表时发生错误: {e_watchlist}", exc_info=True)
@@ -3735,130 +3540,132 @@ class MediaProcessor:
     # --- 从 TMDb 直接下载图片 (用于实时监控/预处理) ---
     def download_images_from_tmdb(self, tmdb_id: str, item_type: str) -> bool:
         """
-        【主动监控专用】
         直接从 TMDb API 获取并下载图片到本地 override 目录。
-        用于在 Emby 尚未入库时，预先准备好图片素材。
         """
         if not tmdb_id or not self.local_data_path:
-            logger.error(f"  ➜ [TMDb图片预取] 缺少 TMDb ID 或本地路径配置，无法下载。")
+            logger.error(f"  ➜ [TMDb图片下载] 缺少 TMDb ID 或本地路径配置，无法下载。")
             return False
 
         try:
-            log_prefix = "[TMDb图片预取]"
+            log_prefix = "[TMDb图片下载]"
             
-            # 1. 准备目录 (保持与 sync_item_images 一致的目录结构)
+            # 1. 准备目录
             cache_folder_name = "tmdb-movies2" if item_type == "Movie" else "tmdb-tv"
             base_override_dir = os.path.join(self.local_data_path, "override", cache_folder_name, str(tmdb_id))
             image_override_dir = os.path.join(base_override_dir, "images")
             os.makedirs(image_override_dir, exist_ok=True)
 
-            # 2. 从 TMDb 获取图片数据
-            logger.info(f"  ➜ {log_prefix} 正在从 TMDb API 获取图片链接 (ID: {tmdb_id})...")
-            
-            tmdb_data = None
-            if item_type == "Movie":
-                tmdb_data = tmdb.get_movie_details(int(tmdb_id), self.tmdb_api_key, append_to_response="images")
-            elif item_type == "Series":
-                tmdb_data = tmdb.get_tv_details(int(tmdb_id), self.tmdb_api_key, append_to_response="images,seasons")
-            
-            if not tmdb_data:
-                logger.error(f"  ➜ {log_prefix} 无法获取 TMDb 数据。")
-                return False
-            
-            # ★★★ 读取语言偏好配置 ★★★
+            # 先获取基础信息以确定原语言
+            orig_lang = "en" # 默认兜底
+            try:
+                # 发起一个轻量级请求（不带 append_to_response），只为拿 original_language
+                if item_type == "Movie":
+                    base_info = tmdb.get_movie_details(int(tmdb_id), self.tmdb_api_key, append_to_response="")
+                elif item_type == "Series":
+                    base_info = tmdb.get_tv_details(int(tmdb_id), self.tmdb_api_key, append_to_response="")
+
+                if base_info:
+                    orig_lang = base_info.get("original_language", "en")
+            except Exception as e:
+                logger.warning(f"  ➜ {log_prefix} 获取原语言失败，将默认使用 en: {e}")
+
+            # 2. 确定搜索策略
             lang_pref = self.config.get(constants.CONFIG_OPTION_TMDB_IMAGE_LANGUAGE_PREFERENCE, 'zh')
-            original_lang_code = tmdb_data.get("original_language", "en")
+
+            search_strategies = []
             
-            logger.debug(f"  ➜ {log_prefix} 图片偏好: {'中文优先' if lang_pref == 'zh' else '原语言优先'} (原语言: {original_lang_code})")
+            if lang_pref == 'zh':
+                # 策略 A: 严格中文优先
+                search_strategies.append(("zh-CN", "简体中文"))
+                search_strategies.append(("zh,zh-TW", "繁体中文"))
+                search_strategies.append(("en,null", "英文/无文字"))
+            else:
+                # 策略 B: 原语言优先
+                # 例如：韩国电影(ko)，这里就会先找 ko 的海报
+                if orig_lang != 'en':
+                    search_strategies.append((orig_lang, f"原语言({orig_lang})"))
+
+                # 2. 第二顺位：英文/无文字 (高质量通用图)
+                # 如果原语言就是英语(en)，这一步自然就覆盖了原语言
+                search_strategies.append(("en,null", "英文/无文字"))
+
+                # 3. 第三顺位：中文兜底
+                search_strategies.append(("zh-CN,zh-TW,zh", "中文兜底"))
+
+            tmdb_data = None
+            used_strategy = ""
+
+            # 3. 执行分步请求
+            for lang_param, desc in search_strategies:
+                logger.debug(f"  ➜ {log_prefix} 尝试获取图片，策略: {desc} ...")
+
+                try:
+                    if item_type == "Movie":
+                        data = tmdb.get_movie_details(
+                            int(tmdb_id),
+                            self.tmdb_api_key,
+                            append_to_response="images",
+                            include_image_language=lang_param
+                        )
+                    elif item_type == "Series":
+                        data = tmdb.get_tv_details(
+                            int(tmdb_id),
+                            self.tmdb_api_key,
+                            append_to_response="images,seasons",
+                            include_image_language=lang_param
+                        )
+
+                    if data and data.get("images", {}).get("posters"):
+                        tmdb_data = data
+                        used_strategy = desc
+                        logger.info(f"  ➜ {log_prefix} 成功通过策略 [{desc}] 获取到 {len(data['images']['posters'])} 张海报。")
+                        break
+                    else:
+                        logger.debug(f"  ➜ {log_prefix} 策略 [{desc}] 未返回有效海报，尝试下一策略...")
+
+                except Exception as e:
+                    logger.warning(f"  ➜ {log_prefix} 策略 [{desc}] 请求失败: {e}")
+
+            if not tmdb_data:
+                logger.error(f"  ➜ {log_prefix} 所有策略均未获取到图片数据。")
+                return False
 
             # =========================================================
-            # ★★★ 定义通用图片选择逻辑 (不再偷懒，统一逻辑) ★★★
+            # 4. 图片选择逻辑
             # =========================================================
-            def _select_best_image(image_list: list, preference: str, orig_lang: str) -> Optional[str]:
-                if not image_list:
-                    return None
-                
-                selected = None
-                if preference == 'zh':
-                    # 策略 A: 中文 > 原语言 > 英文 > 第一个
-                    for img in image_list:
-                        if img.get("iso_639_1") == "zh": return img["file_path"]
-                    for img in image_list:
-                        if img.get("iso_639_1") == orig_lang: return img["file_path"]
-                    for img in image_list:
-                        if img.get("iso_639_1") == "en": return img["file_path"]
-                else:
-                    # 策略 B: 原语言 > 英文 > 中文 > 第一个
-                    for img in image_list:
-                        if img.get("iso_639_1") == orig_lang: return img["file_path"]
-                    if orig_lang != 'en':
-                        for img in image_list:
-                            if img.get("iso_639_1") == "en": return img["file_path"]
-                    for img in image_list:
-                        if img.get("iso_639_1") == "zh": return img["file_path"]
-                
-                # 兜底：返回评分最高的第一个（TMDb默认已按评分排序）
-                return image_list[0]["file_path"]
-
-            # 3. 定义下载任务列表
             downloads = []
             images_node = tmdb_data.get("images", {})
 
             # --- A. 海报 (Poster) ---
-            # ★★★ 修复：不再直接取 poster_path，而是去 posters 列表里挑 ★★★
             posters_list = images_node.get("posters", [])
-            selected_poster = _select_best_image(posters_list, lang_pref, original_lang_code)
-            
-            # 如果列表里没挑出来（极少见），再用顶层字段兜底
-            if not selected_poster:
-                selected_poster = tmdb_data.get("poster_path")
-            
-            if selected_poster:
+            if posters_list:
+                selected_poster = posters_list[0]["file_path"]
                 downloads.append((selected_poster, "poster.jpg"))
-            
-            # --- B. 背景 (Backdrop / Fanart) ---
-            # 背景图通常首选无文字(null)，其次才看语言。
-            # 这里我们稍微变通一下：如果用户选了原语言优先，我们尝试找原语言的；
-            # 否则（中文优先），我们倾向于找无文字的或者中文的。
-            # 但为了简单且符合“原图”的高质量要求，背景图我们通常还是信任 TMDb 的默认排序（通常是无文字的高分图）。
-            
+                logger.info(f"  ➜ {log_prefix} 选中海报: {selected_poster} (评分: {posters_list[0].get('vote_average')})")
+
+            # --- B. 背景 (Backdrop) ---
             backdrops_list = images_node.get("backdrops", [])
             selected_backdrop = None
-            
-            # 特殊逻辑：背景图优先找无文字 (iso_639_1 is None or 'null')
-            for img in backdrops_list:
-                if img.get("iso_639_1") in [None, "null"]:
-                    selected_backdrop = img["file_path"]
-                    break
-            
-            # 如果没找到无文字的，再按语言偏好找
-            if not selected_backdrop:
-                selected_backdrop = _select_best_image(backdrops_list, lang_pref, original_lang_code)
-            
-            # 兜底
+            if backdrops_list:
+                selected_backdrop = backdrops_list[0]["file_path"]
+
             if not selected_backdrop:
                 selected_backdrop = tmdb_data.get("backdrop_path")
 
             if selected_backdrop:
                 downloads.append((selected_backdrop, "fanart.jpg"))
-                # 顺便拿第一张背景做 landscape (缩略图)
                 downloads.append((selected_backdrop, "landscape.jpg"))
 
-            # --- C. Logo (Clearlogo) ---
+            # --- C. Logo ---
             logos_list = images_node.get("logos", [])
-            selected_logo = _select_best_image(logos_list, lang_pref, original_lang_code)
-            
-            if selected_logo:
-                downloads.append((selected_logo, "clearlogo.png"))
+            if logos_list:
+                downloads.append((logos_list[0]["file_path"], "clearlogo.png"))
 
-            # --- D. 剧集特有：季海报 ---
+            # --- D. 剧集季海报 ---
             if item_type == "Series":
                 seasons = tmdb_data.get("seasons", [])
                 for season in seasons:
                     s_num = season.get("season_number")
-                    # 季海报通常在顶层数据里没有详细的 images 列表，只能拿 poster_path
-                    # 要想精确控制季海报语言，需要单独请求每一季的详情，这会增加很多 API 请求。
-                    # 考虑到性能，季海报这里暂时保持原样（通常季海报文字较少）。
                     s_poster = season.get("poster_path")
                     if s_num is not None and s_poster:
                         downloads.append((s_poster, f"season-{s_num}.jpg"))
@@ -3866,32 +3673,27 @@ class MediaProcessor:
             # 4. 执行下载
             base_image_url = "https://wsrv.nl/?url=https://image.tmdb.org/t/p/original"
             success_count = 0
-            
             import requests
             
             for tmdb_path, local_name in downloads:
                 if not tmdb_path: continue
-                
                 full_url = f"{base_image_url}{tmdb_path}"
                 save_path = os.path.join(image_override_dir, local_name)
-                
-                # 如果文件已存在且大小不为0，跳过
+
                 if os.path.exists(save_path) and os.path.getsize(save_path) > 0:
                     continue
 
                 try:
-                    # 使用简单的 requests 下载，带超时
                     resp = requests.get(full_url, timeout=15)
                     if resp.status_code == 200:
                         with open(save_path, 'wb') as f:
                             f.write(resp.content)
                         success_count += 1
-                        # 稍微延时避免触发 TMDb 速率限制
                         time_module.sleep(0.1)
                 except Exception as e:
                     logger.warning(f"  ➜ 下载图片失败 {local_name}: {e}")
 
-            logger.info(f"  ➜ {log_prefix} 图片预取完成，共下载 {success_count} 张图片。")
+            logger.info(f"  ➜ {log_prefix} 共下载 {success_count} 张图片。")
             return True
 
         except Exception as e:
@@ -3939,18 +3741,17 @@ class MediaProcessor:
                 tmdb_seasons_data = metadata_override['seasons_details']
 
             # 创建一个副本，避免修改原始对象影响后续逻辑
-            data_to_write = metadata_override.copy()
+            data_to_write = copy.deepcopy(metadata_override)
 
             # 工作室/电视网中文化处理
             if self.config.get(constants.CONFIG_OPTION_STUDIO_TO_CHINESE, False):
                 try:
-                    # A. 获取映射表 (数据库优先 -> Utils兜底)
+                    # A. 获取映射表
                     studio_mapping_data = settings_db.get_setting('studio_mapping')
                     if not studio_mapping_data:
                         studio_mapping_data = utils.DEFAULT_STUDIO_MAPPING
                     
-                    # B. 构建两个独立的查找表，防止 Network ID 和 Company ID 冲突
-                    # 例如：ID 521 在 network_id_map 是 CCTV-8，在 company_id_map 是 梦工厂
+                    # B. 构建两个独立的查找表
                     company_id_map = {}
                     network_id_map = {}
                     name_map = {} 
@@ -3958,27 +3759,14 @@ class MediaProcessor:
                     for entry in studio_mapping_data:
                         label = entry.get('label')
                         if not label: continue
-                        
-                        # 填充 Company 表
-                        for cid in entry.get('company_ids', []):
-                            company_id_map[int(cid)] = label
-                        
-                        # 填充 Network 表
-                        for nid in entry.get('network_ids', []):
-                            network_id_map[int(nid)] = label
-                        
-                        # 名称映射 (转小写以模糊匹配)
-                        for en_name in entry.get('en', []):
-                            name_map[en_name.lower().strip()] = label
+                        # 分别存入对应的 ID 表
+                        for cid in entry.get('company_ids', []): company_id_map[int(cid)] = label
+                        for nid in entry.get('network_ids', []): network_id_map[int(nid)] = label
+                        # 名称映射作为兜底
+                        for en_name in entry.get('en', []): name_map[en_name.lower().strip()] = label
 
-                    # 获取原语言，用于解决 ID 冲突 (如 521: CCTV-8 vs 梦工厂)
-                    origin_lang = data_to_write.get('original_language', '').lower()
-                    # 定义通用过滤函数
+                    # C. 定义通用过滤函数 (逻辑已简化)
                     def filter_and_translate_studios(source_list, is_network_field=False):
-                        """
-                        is_network_field=True: 查 network_id_map (用于 Series 的 networks)
-                        is_network_field=False: 查 company_id_map (用于 production_companies)
-                        """
                         if not source_list: return []
                         filtered = []
                         for item in source_list:
@@ -3986,64 +3774,90 @@ class MediaProcessor:
                             s_name = item.get('name', '').strip()
                             mapped_label = None
                             
-                            # 1. 尝试 ID 匹配
+                            # 1. 优先 ID 匹配 (精准区分 Network 和 Company)
                             if s_id is not None:
                                 try:
                                     s_id_int = int(s_id)
-                                    
-                                    # ★★★ 核心修复开始：冲突仲裁 ★★★
-                                    # 如果是剧集，且正在处理制作公司字段 (production_companies)，
-                                    # 且原语言是中文，优先检查 Network 表。
-                                    # 解决 ID 521 被误判为梦工厂 (Company) 而非 CCTV-8 (Network) 的问题。
-                                    if item_type == 'Series' and not is_network_field and origin_lang in ['zh', 'cn', 'chi', 'zho']:
-                                        if s_id_int in network_id_map:
-                                            mapped_label = network_id_map.get(s_id_int)
-
-                                    # 如果上面没命中，或者不是国产剧，则执行标准逻辑
-                                    if not mapped_label:
-                                        if is_network_field: 
-                                            mapped_label = network_id_map.get(s_id_int)
-                                        else: 
-                                            mapped_label = company_id_map.get(s_id_int)
-                                    # ★★★ 核心修复结束 ★★★
-
+                                    if is_network_field:
+                                        # 如果是 networks 字段，只查 network_id_map
+                                        mapped_label = network_id_map.get(s_id_int)
+                                    else:
+                                        # 如果是 production_companies 字段，只查 company_id_map
+                                        mapped_label = company_id_map.get(s_id_int)
                                 except: pass
                             
                             # 2. 尝试名称匹配 (兜底)
                             if not mapped_label and s_name:
                                 mapped_label = name_map.get(s_name.lower())
                             
-                            # 3. 核心逻辑：有映射则改名并保留，无映射则直接丢弃
+                            # 3. 有映射则改名并保留，无映射则丢弃
                             if mapped_label:
                                 item['name'] = mapped_label
                                 filtered.append(item)
-                        
                         return filtered
 
-                    # C. 执行过滤 (针对 Movie 的 production_companies)
+                    # D. 执行过滤
                     if item_type == 'Movie' and 'production_companies' in data_to_write:
-                        raw_companies = data_to_write['production_companies']
-                        # 电影只有制作公司，查 company_id_map
-                        data_to_write['production_companies'] = filter_and_translate_studios(raw_companies, is_network_field=False)
-                        logger.info(f"  ➜ {log_prefix} [工作室中文化] 电影制作公司: {len(raw_companies)} -> {len(data_to_write['production_companies'])} 个 (未映射的已丢弃)")
+                        # 电影只有制作公司
+                        data_to_write['production_companies'] = filter_and_translate_studios(data_to_write['production_companies'], is_network_field=False)
 
-                    # D. 执行过滤 (针对 Series 的 networks 和 production_companies)
                     elif item_type == 'Series':
-                        # 1. 剧集主要看 networks (电视网)，查 network_id_map
-                        # 这里 ID 521 会被正确识别为 CCTV-8
+                        # 剧集：Networks 查 Network 表
                         if 'networks' in data_to_write:
-                            raw_networks = data_to_write['networks']
-                            data_to_write['networks'] = filter_and_translate_studios(raw_networks, is_network_field=True)
-                            logger.info(f"  ➜ {log_prefix} [工作室中文化] 剧集电视网: {len(raw_networks)} -> {len(data_to_write['networks'])} 个 (未映射的已丢弃)")
+                            data_to_write['networks'] = filter_and_translate_studios(data_to_write['networks'], is_network_field=True)
                         
-                        # 2. 剧集有时也有制作公司，查 company_id_map
-                        # 这里 ID 521 会被正确识别为 梦工厂 (如果它真的出现在这里)
+                        # 剧集：Production Companies 查 Company 表
                         if 'production_companies' in data_to_write:
-                            raw_companies = data_to_write['production_companies']
-                            data_to_write['production_companies'] = filter_and_translate_studios(raw_companies, is_network_field=False)
+                            data_to_write['production_companies'] = filter_and_translate_studios(data_to_write['production_companies'], is_network_field=False)
 
                 except Exception as e_studio:
                     logger.warning(f"  ➜ {log_prefix} 处理工作室中文化时发生错误: {e_studio}")
+
+            # =========================================================
+            # 2. ★★★ 剧集专属：合并 Networks 和 Production Companies ★★★
+            # =========================================================
+            if item_type == 'Series':
+                # 获取两个列表
+                current_networks = data_to_write.get('networks', [])
+                current_companies = data_to_write.get('production_companies', [])
+
+                # 合并
+                merged_list = current_networks + current_companies
+
+                # 去重 (优先 ID，其次 Name)
+                unique_networks = []
+                seen_ids = set()
+                seen_names = set()
+
+                for item in merged_list:
+                    if not isinstance(item, dict): continue
+
+                    i_id = item.get('id')
+                    i_name = item.get('name')
+
+                    is_duplicate = False
+
+                    if i_id:
+                        if i_id in seen_ids: is_duplicate = True
+                        else: seen_ids.add(i_id)
+
+                    if i_name:
+                        if i_name in seen_names: is_duplicate = True
+                        else: seen_names.add(i_name)
+
+                    if not i_id and not i_name: continue
+
+                    if not is_duplicate:
+                        unique_networks.append(item)
+
+                # 回写到 networks
+                data_to_write['networks'] = unique_networks
+
+                # ★★★ 关键：删除 production_companies，Emby 剧集不读此字段，且防止冗余 ★★★
+                if 'production_companies' in data_to_write:
+                    del data_to_write['production_companies']
+
+                logger.debug(f"  ➜ {log_prefix} [剧集优化] 已将制作公司合并入电视网并去重，最终数量: {len(unique_networks)}")
 
             # --- 关键词映射处理并写入 tags.json ---
             if self.config.get(constants.CONFIG_OPTION_KEYWORD_TO_TAGS, False):

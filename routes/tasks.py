@@ -14,12 +14,12 @@ logger = logging.getLogger(__name__)
 # 创建一个新的蓝图
 tasks_bp = Blueprint('tasks', __name__, url_prefix='/api/tasks')
 
-# ★★★ 新增API：获取所有可供选择的任务 ★★★
+# --- 获取所有可供选择的任务 ---
 @tasks_bp.route('/available', methods=['GET'])
 @admin_required
 def get_available_tasks():
     """
-    【V2】返回一个可用于任务链配置的、有序的、人类可读的任务列表。
+    返回一个可用于任务链配置的、有序的、人类可读的任务列表。
     它现在只返回那些被标记为适合在任务链中运行的任务。
     """
     try:
@@ -58,13 +58,12 @@ def run_task():
         if not task_info:
             return jsonify({"error": f"未知的任务名称: {task_key}"}), 404
 
-        # ★★★ 核心修复：从注册表中解包出所有信息，包括处理器类型 ★★★
         task_function_obj, task_description, processor_type = task_info
         
         success = task_manager.submit_task(
             task_function=task_function_obj, 
             task_name=task_description,
-            processor_type=processor_type, # <--- 将精确的处理器类型传递进去
+            processor_type=processor_type, 
             **data
         )
         

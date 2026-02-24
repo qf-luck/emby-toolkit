@@ -3,7 +3,7 @@
 # ==============================================================================
 # ✨ 应用基础信息 (Application Basics)
 # ==============================================================================
-APP_VERSION = "6.7.2"  # 更新版本号
+APP_VERSION = "7.0.4"  # 更新版本号
 GITHUB_REPO_OWNER = "hbq0405"  # 您的 GitHub 用户名
 GITHUB_REPO_NAME = "emby-toolkit" # 您的 GitHub 仓库名
 DEBUG_MODE = True     # 开发模式开关，部署时应设为 False
@@ -42,6 +42,25 @@ CONFIG_OPTION_MONITOR_EXCLUDE_REFRESH_DELAY = "monitor_exclude_refresh_delay"
 DEFAULT_MONITOR_EXCLUDE_REFRESH_DELAY = 0 # 默认不延迟
 
 # ==============================================================================
+# ✨ 115 网盘配置 (115 Cloud Drive) - ★★★ 新增 ★★★
+# ==============================================================================
+CONFIG_SECTION_115 = "115"
+CONFIG_OPTION_115_COOKIES = "p115_cookies"
+CONFIG_OPTION_115_SAVE_PATH_CID = "p115_save_path_cid"
+CONFIG_OPTION_115_SAVE_PATH_NAME = "p115_save_path_name"
+CONFIG_OPTION_115_MEDIA_ROOT_NAME = "p115_media_root_name"     # 网盘媒体库根目录名称
+CONFIG_OPTION_115_INTERVAL = "p115_request_interval"           # API请求间隔
+CONFIG_OPTION_115_ENABLE_ORGANIZE = "p115_enable_organize"     # 智能整理总开关
+CONFIG_OPTION_115_EXTENSIONS = "p115_extensions"               # 115转存/上传的文件扩展名列表
+DB_KEY_115_SORTING_RULES = "p115_sorting_rules"                # 存储 115 分类规则的数据库键名
+CONFIG_OPTION_115_MEDIA_ROOT_CID = "p115_media_root_cid"       # 115网盘媒体库根目录CID
+CONFIG_OPTION_LOCAL_STRM_ROOT = "local_strm_root"              # 本地生成.strm的根目录
+CONFIG_OPTION_ETK_SERVER_URL = "etk_server_url"                # ETK服务器地址 (用于strm文件内)
+CONFIG_OPTION_115_ENABLE_SYNC_DELETE = "p115_enable_sync_delete" # 是否联动删除网盘文件
+CONFIG_OPTION_115_DOWNLOAD_SUBS = "p115_download_subs"         # 是否下载字幕文件
+CONFIG_OPTION_115_LOCAL_CLEANUP = "p115_local_cleanup"         # 是否启用本地清理功能
+
+# ==============================================================================
 # ✨ 通知服务 (Notification Services)
 # ==============================================================================
 CONFIG_SECTION_TELEGRAM = "Telegram"
@@ -56,8 +75,6 @@ CONFIG_OPTION_PROXY_ENABLED = "proxy_enabled"
 CONFIG_OPTION_PROXY_PORT = "proxy_port"
 CONFIG_OPTION_PROXY_MERGE_NATIVE = "proxy_merge_native_libraries"
 CONFIG_OPTION_PROXY_NATIVE_VIEW_SELECTION = "proxy_native_view_selection"  # List[str]
-CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER = "proxy_native_view_order"  # str, 'before' or 'after'
-CONFIG_OPTION_PROXY_302_REDIRECT_URL = "proxy_302_redirect_url"
 CONFIG_OPTION_PROXY_NATIVE_VIEW_ORDER = "proxy_native_view_order"  # str, 'before' or 'after'
 CONFIG_OPTION_PROXY_SHOW_MISSING_PLACEHOLDERS = "proxy_show_missing_placeholders"
 
@@ -118,7 +135,6 @@ CONFIG_OPTION_MOVIEPILOT_URL = "moviepilot_url"
 CONFIG_OPTION_MOVIEPILOT_USERNAME = "moviepilot_username"
 CONFIG_OPTION_MOVIEPILOT_PASSWORD = "moviepilot_password"
 # --- 智能订阅相关配置 ---
-CONFIG_OPTION_AUTOSUB_ENABLED = "autosub_enabled" # 智能订阅总开关
 CONFIG_OPTION_RESUBSCRIBE_DAILY_CAP = "resubscribe_daily_cap"
 CONFIG_OPTION_RESUBSCRIBE_DELAY_SECONDS = "resubscribe_delay_seconds"
 

@@ -162,11 +162,6 @@ def get_resubscribe_library_status(where_clause: str = "", params: tuple = ()) -
         with get_db_connection() as conn:
             cursor = conn.cursor()
 
-            # 核心修复：优化 JOIN 条件
-            # 1. 对于电影：直接匹配 tmdb_id
-            # 2. 对于季：resubscribe_index 的 tmdb_id 其实是 parent_series_tmdb_id，
-            #    所以要用 parent_series_tmdb_id 和 season_number 组合去匹配 media_metadata
-            
             sql = f"""
                 SELECT 
                     idx.tmdb_id, 
@@ -175,15 +170,12 @@ def get_resubscribe_library_status(where_clause: str = "", params: tuple = ()) -
                     idx.status, 
                     idx.reason, 
                     idx.matched_rule_id,
-                    -- ★★★ 新增：关联规则表获取操作类型 ★★★
                     COALESCE(rr.rule_type, 'resubscribe') as action,
                     
                     -- 智能获取名称
                     COALESCE(
                         CASE 
-                            -- 如果是季，强制拼接为：父剧集标题 + ' - 第 ' + 季号 + ' 季'
                             WHEN idx.item_type = 'Season' THEN parent.title || ' - 第 ' || idx.season_number || ' 季'
-                            -- 如果是电影，保持原样
                             ELSE m.title 
                         END, 
                         '未知项目'
@@ -196,12 +188,12 @@ def get_resubscribe_library_status(where_clause: str = "", params: tuple = ()) -
                     m.emby_item_ids_json->>0 as emby_item_id,
                     parent.emby_item_ids_json->>0 as series_emby_id,
 
+                    -- 直接获取缺集信息 
+                    m.watchlist_missing_info_json,
+
                     -- 获取资产详情
                     CASE 
-                        -- 电影：直接取
                         WHEN idx.item_type = 'Movie' THEN m.asset_details_json->0
-                        
-                        -- 季：查找该季第一集的资产
                         WHEN idx.item_type = 'Season' THEN (
                             SELECT ep.asset_details_json->0
                             FROM media_metadata ep
@@ -215,18 +207,15 @@ def get_resubscribe_library_status(where_clause: str = "", params: tuple = ()) -
 
                 FROM resubscribe_index idx
                 
-                -- ★★★ 新增：关联规则表 ★★★
                 LEFT JOIN resubscribe_rules rr ON idx.matched_rule_id = rr.id
                 
-                -- ★★★ 核心修复开始 ★★★
+                -- 关联 media_metadata (逻辑保持不变)
                 LEFT JOIN media_metadata m ON (
                     (idx.item_type = 'Movie' AND idx.tmdb_id = m.tmdb_id AND m.item_type = 'Movie')
                     OR
                     (idx.item_type = 'Season' AND idx.tmdb_id = m.parent_series_tmdb_id AND idx.season_number = m.season_number AND m.item_type = 'Season')
                 )
-                -- ★★★ 核心修复结束 ★★★
 
-                -- 关联父剧集 (仅用于季的标题/海报回退)
                 LEFT JOIN media_metadata parent 
                     ON m.parent_series_tmdb_id = parent.tmdb_id AND parent.item_type = 'Series'
                 
@@ -240,6 +229,10 @@ def get_resubscribe_library_status(where_clause: str = "", params: tuple = ()) -
             for row in rows:
                 asset = row.get('asset_details') or {}
                 
+                # ★★★ 解析缺集数据 ★★★
+                missing_info = row.get('watchlist_missing_info_json') or {}
+                missing_episodes = missing_info.get('missing_episodes', []) if isinstance(missing_info, dict) else []
+
                 item = {
                     "item_id": f"{row['tmdb_id']}-{row['item_type']}" + (f"-S{row['season_number']}" if row['item_type'] == 'Season' else ""),
                     "tmdb_id": row['tmdb_id'],
@@ -249,12 +242,12 @@ def get_resubscribe_library_status(where_clause: str = "", params: tuple = ()) -
                     "status": row['status'],
                     "reason": row['reason'],
                     "matched_rule_id": row['matched_rule_id'],
-                    # ★★★ 新增：返回 action 字段 ★★★
                     "action": row['action'],
                     "item_name": row['item_name'],
                     "poster_path": row['poster_path'],
                     "emby_item_id": row['emby_item_id'],
                     "series_emby_id": row['series_emby_id'],
+                    "missing_episodes": missing_episodes,
                     "resolution_display": asset.get('resolution_display', 'Unknown'),
                     "quality_display": asset.get('quality_display', 'Unknown'),
                     "release_group_raw": asset.get('release_group_raw', '无'),
@@ -511,3 +504,32 @@ def get_episode_ids_for_season(parent_tmdb_id: str, season_number: int) -> List[
     except Exception as e:
         logger.error(f"  ➜ 获取分集ID列表失败: {e}", exc_info=True)
         return []
+    
+# --- 批量更新媒体的缺集信息 ---
+def batch_update_missing_info(updates: Dict[str, List[int]]):
+    """
+    更新 media_metadata 表的 watchlist_missing_info_json 字段。
+    updates: { 'tmdb_id': [1, 2, 3], ... }
+    """
+    if not updates: return
+    
+    data_list = [
+        (Json({'missing_episodes': missing_eps}), tmdb_id)
+        for tmdb_id, missing_eps in updates.items()
+    ]
+    
+    try:
+        with get_db_connection() as conn:
+            with conn.cursor() as cursor:
+                sql = """
+                    UPDATE media_metadata AS m
+                    SET watchlist_missing_info_json = v.info
+                    FROM (VALUES %s) AS v(info, tmdb_id)
+                    WHERE m.tmdb_id = v.tmdb_id AND m.item_type = 'Season'
+                """
+                
+                execute_values(cursor, sql, data_list, template="(%s::jsonb, %s)")
+                
+                conn.commit()
+    except Exception as e:
+        logger.error(f"  ➜ 批量更新缺集信息失败: {e}", exc_info=True)

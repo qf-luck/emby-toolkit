@@ -31,7 +31,7 @@
             <n-radio-group v-model:value="filter" size="small">
               <n-radio-button value="all">全部</n-radio-button>
               <n-radio-button value="needed">需处理</n-radio-button>
-              <n-radio-button value="auto">自动处理</n-radio-button>
+              <n-radio-button value="subscribed">处理中</n-radio-button>
               <n-radio-button value="ignored">已忽略</n-radio-button>
             </n-radio-group>
             <n-button @click="showSettingsModal = true">规则设定</n-button>
@@ -130,7 +130,6 @@
                 <div v-if="item.status === 'needed'" class="poster-stamp stamp-needed">需处理</div>
                 <div v-else-if="item.status === 'ignored'" class="poster-stamp stamp-ignored">已忽略</div>
                 <div v-else-if="item.status === 'subscribed'" class="poster-stamp stamp-subscribed">处理中</div>
-                <div v-else-if="item.status === 'auto_subscribed'" class="poster-stamp stamp-auto">自动中</div>
               </div>
 
               <!-- 右侧内容 -->
@@ -158,10 +157,6 @@
                         <n-icon :component="SyncOutline" />
                         <n-ellipsis :tooltip="true">(处理中) {{ item.reason }}</n-ellipsis>
                       </div>
-                      <div v-else-if="item.status === 'auto_subscribed'" class="reason-text-wrapper text-auto">
-                        <n-icon :component="SyncOutline" />
-                        <n-ellipsis :tooltip="true">(自动) {{ item.reason }}</n-ellipsis>
-                      </div>
                       <n-tag v-else :type="getStatusInfo(item.status).type" size="small" round>
                         {{ getStatusInfo(item.status).text }}
                       </n-tag>
@@ -188,6 +183,16 @@
                         <n-tooltip trigger="hover" placement="top-start">
                             <template #trigger><n-text :depth="3" class="info-text ellipsis full-width-item">字幕: {{ item.subtitle_display }}</n-text></template>
                             {{ item.subtitle_display }}
+                        </n-tooltip>
+                        <!-- 缺集展示 -->
+                        <n-tooltip v-if="item.missing_episodes && item.missing_episodes.length > 0" trigger="hover" placement="top-start">
+                            <template #trigger>
+                                <n-text class="info-text full-width-item" style="color: var(--n-error-color);">
+                                    <n-icon :component="AlertCircleOutline" style="vertical-align: -2px; margin-right: 2px;" />
+                                    缺失: {{ item.missing_episodes.length }} 集
+                                </n-text>
+                            </template>
+                            缺失集号: {{ item.missing_episodes.join(', ') }}
                         </n-tooltip>
                       </div>
                     </n-space>
@@ -290,8 +295,8 @@ const filteredItems = computed(() => {
     items = items.filter(item => item.status === 'needed');
   } else if (filter.value === 'ignored') {
     items = items.filter(item => item.status === 'ignored');
-  } else if (filter.value === 'auto') { 
-    items = items.filter(item => item.status === 'auto_subscribed');
+  } else if (filter.value === 'subscribed') {
+    items = items.filter(item => item.status === 'subscribed');
   }
 
   if (searchQuery.value) {
@@ -327,8 +332,7 @@ const filteredItems = computed(() => {
 const getStatusInfo = (status) => {
   switch (status) {
     case 'needed': return { text: '需处理', type: 'warning' };
-    case 'subscribed': return { text: '已提交', type: 'info' };
-    case 'auto_subscribed': return { text: '自动处理', type: 'primary' };
+    case 'subscribed': return { text: '处理中', type: 'info' };
     case 'ignored': return { text: '已忽略', type: 'tertiary' };
     case 'ok': default: return { text: '已达标', type: 'success' };
   }

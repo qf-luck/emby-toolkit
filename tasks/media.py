@@ -901,11 +901,13 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                 # 提取发行日期 
                 emby_date = item.get('PremiereDate') or None
                 tmdb_date = None
+                tmdb_last_date = None
                 if tmdb_details:
                     if item_type == 'Movie': 
                         tmdb_date = tmdb_details.get('release_date')
                     elif item_type == 'Series': 
                         tmdb_date = tmdb_details.get('first_air_date')
+                        tmdb_last_date = tmdb_details.get('last_air_date')
                 
                 final_release_date = emby_date or tmdb_date
                 # 提取全量分级数据
@@ -935,6 +937,16 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                             if name in utils.GENRE_TRANSLATION_PATCH:
                                 name = utils.GENRE_TRANSLATION_PATCH[name]
                             final_genres_list.append({"id": 0, "name": name})
+                # 1. 处理制作公司 & 2. 处理电视网 
+                fmt_companies = []
+                fmt_networks = []
+                
+                if tmdb_details:
+                    raw_companies = tmdb_details.get('production_companies') or []
+                    fmt_companies = [{'id': c.get('id'), 'name': c.get('name')} for c in raw_companies if c.get('name')]
+                    
+                    raw_networks = tmdb_details.get('networks') or []
+                    fmt_networks = [{'id': n.get('id'), 'name': n.get('name')} for n in raw_networks if n.get('name')]
                 top_record = {
                     "tmdb_id": tmdb_id_str, "item_type": item_type, "title": item.get('Name'),
                     "original_title": item.get('OriginalTitle'), "release_year": item.get('ProductionYear'),
@@ -947,42 +959,24 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     "rating": item.get('CommunityRating'),
                     "date_added": item.get('DateCreated') or None,
                     "release_date": final_release_date,
+                    "last_air_date": tmdb_last_date,
                     "genres_json": json.dumps(final_genres_list, ensure_ascii=False),
+                    "production_companies_json": json.dumps(fmt_companies, ensure_ascii=False), 
+                    "networks_json": json.dumps(fmt_networks, ensure_ascii=False),
                     "tags_json": json.dumps(extract_tag_names(item), ensure_ascii=False),
                     "official_rating_json": rating_json_str,
                     "runtime_minutes": emby_runtime if (item_type == 'Movie' and emby_runtime) else tmdb_details.get('runtime') if (item_type == 'Movie' and tmdb_details) else None
                 }
                 if tmdb_details:
                     top_record['poster_path'] = tmdb_details.get('poster_path')
+                    top_record['backdrop_path'] = tmdb_details.get('backdrop_path') 
+                    top_record['homepage'] = tmdb_details.get('homepage')
                     top_record['overview'] = tmdb_details.get('overview')
                     if tmdb_details.get('vote_average') is not None:
                         top_record['rating'] = tmdb_details.get('vote_average')
                     # 采集总集数
                     if item_type == 'Series':
                         top_record['total_episodes'] = tmdb_details.get('number_of_episodes', 0)
-                    # 1. 获取基础制作公司
-                    raw_studios = []
-                    if item_type == 'Series':
-                        # 剧集：只要播出平台 (Networks)，不要制作公司
-                        raw_studios = tmdb_details.get('networks') or []
-                    else:
-                        # 电影：保留制作公司
-                        raw_studios = tmdb_details.get('production_companies') or []
-                    
-                    # 确保是列表
-                    if not isinstance(raw_studios, list):
-                        raw_studios = []
-
-                    # 2. 去重 (使用字典以 ID 为键进行去重) 并格式化
-                    unique_studios_map = {}
-                    for s in raw_studios:
-                        s_id = s.get('id')
-                        s_name = s.get('name')
-                        if s_name:
-                            # 如果 ID 冲突，后来的覆盖前面的
-                            unique_studios_map[s_id] = {'id': s_id, 'name': s_name}
-
-                    top_record['studios_json'] = json.dumps(list(unique_studios_map.values()), ensure_ascii=False)
                     if item_type == 'Movie':
                         top_record['runtime_minutes'] = tmdb_details.get('runtime')
                     
@@ -1005,7 +999,8 @@ def task_populate_metadata_cache(processor, batch_size: int = 10, force_full_upd
                     top_record['keywords_json'] = json.dumps(keywords, ensure_ascii=False)
                 else:
                     top_record['poster_path'] = None
-                    top_record['studios_json'] = '[]'
+                    top_record['backdrop_path'] = None 
+                    top_record['homepage'] = None
                     top_record['directors_json'] = '[]'; top_record['countries_json'] = '[]'; top_record['keywords_json'] = '[]'
 
                 metadata_batch.append(top_record)

@@ -27,21 +27,23 @@ server {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection "Upgrade";
     proxy_buffering off;
+    proxy_set_header Range $http_range;
+    proxy_set_header If-Range $http_if_range;
+    # 核心：透传所有客户端 Header
+    proxy_pass_request_headers on;
 
     # ====================================================================
     #  核心路由规则 (V4)
     # ====================================================================
 
-    # ★★★ 规则 1：【条件化】转发所有视频流请求 ★★★
-    # 如果设置了 REDIRECT_UPSTREAM，此规则块将生效。
-    # 它会捕获所有主流视频格式、转码流和 .strm 文件，并因为位置靠前而被优先匹配。
-    {% if REDIRECT_UPSTREAM %}
-    location ~* (\.strm$|\.(mkv|mp4|ts|avi|iso|mov|webm|flv)$|/videos/.*stream) {
-        proxy_pass http://redirect_service;
-    }
-    {% endif %}
-
     # --- 以下是虚拟库路由规则 ---
+    location /api/p115 {
+        proxy_pass http://virtual_library_proxy;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
 
     location ~ /emby/Users/([a-f0-9]+)/Views {
         proxy_pass http://virtual_library_proxy;
